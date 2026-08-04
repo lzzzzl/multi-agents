@@ -32,7 +32,8 @@ class TaskOut(BaseModel):
     status: str
     priority: str
     input: dict[str, Any] | None = None
-    metadata: dict[str, Any] | None = Field(None, alias="metadata")
+    # ORM 字段为 metadata_(避开 SQLAlchemy 保留字),序列化时输出为 metadata
+    metadata_: dict[str, Any] | None = Field(None, alias="metadata_", serialization_alias="metadata")
     latest_run_id: str | None = None
     created_at: datetime
     updated_at: datetime

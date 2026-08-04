@@ -41,7 +41,20 @@ class RunService:
         # 写入首个事件。Worker 接管后会继续写入后续事件。
         self.append_event(run.id, type="run_started", payload={"workflow": run.workflow_name})
 
-        # TODO(Phase 1 Step 6): 投递后台 job 给 worker,这里暂不入队。
+        # 投递后台 job 给 worker,不在 HTTP 请求内执行 workflow。
+        # 用 try/except 保护:入队失败不应阻塞 run 创建,worker 也可手动补跑。
+        try:
+            from app.workers.queue import get_queue
+            from app.workers.run_worker import execute_run
+
+            get_queue().enqueue(execute_run, run.id, job_timeout=600)
+        except Exception:
+            # 入队失败时记录,run 保持 queued 状态便于排查/重投
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Failed to enqueue run %s, will stay queued", run.id, exc_info=True
+            )
         return run
 
     def get(self, run_id: str) -> Run:
