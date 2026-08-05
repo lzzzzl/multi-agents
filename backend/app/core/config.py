@@ -18,9 +18,24 @@ class Settings(BaseSettings):
     BACKEND_CORS_ORIGINS: str = "http://localhost:3000"
 
     # 模型供应商
-    LLM_PROVIDER: str = "openai"
+    # mock | openai | deepseek | ...  (mock 用于无 key 时本地兜底)
+    LLM_PROVIDER: str = "mock"
+    # 兼容 key,兼容 base_url 指向任意 OpenAI 兼容网关(DeepSeek / 通义 / Ollama 等)
+    LLM_API_KEY: str = ""
+    LLM_BASE_URL: str = "https://api.deepseek.com"
+    LLM_MODEL: str = "deepseek-chat"
+
+    # 兼容旧配置项:OPENAI_API_KEY / DEFAULT_MODEL 作为缺省来源
     OPENAI_API_KEY: str = ""
     DEFAULT_MODEL: str = "gpt-5"
+
+    @property
+    def effective_llm_api_key(self) -> str:
+        return self.LLM_API_KEY or self.OPENAI_API_KEY
+
+    @property
+    def effective_llm_model(self) -> str:
+        return self.LLM_MODEL or self.DEFAULT_MODEL
 
     # 运行限制
     WORKER_CONCURRENCY: int = 2
