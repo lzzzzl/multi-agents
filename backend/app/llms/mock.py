@@ -42,15 +42,34 @@ class MockLLMProvider(LLMProvider):
     def _respond(self, system_text: str, user_text: str) -> str:
         task_title = _extract_title(user_text)
 
-        if "评审" in system_text or "review" in system_text.lower():
+        if "质量评审 Agent" in system_text or "reviewer" in system_text.lower():
+            # 若被评审内容含 Writer 的修订标记,视为已重写并通过;
+            # 否则首次评审判定为需修改,以触发一次重写循环。
+            if "已按评审意见修订" in user_text:
+                return (
+                    "{\n"
+                    '  "quality": "pass",\n'
+                    '  "score": 9,\n'
+                    '  "feedback": "修改后结构完整、内容准确,达到交付标准。",\n'
+                    '  "final_content": ' + _json_quote(f"# {task_title}\n\n## 概述\n\n本报告由 multi-agent 工作台生成。\n\n## 正文\n\n已根据评审意见完善。\n\n## 结论\n\n经过 Planner、Writer、Reviewer 三阶段协作,已完成交付。") + "\n}"
+                )
             return (
                 "{\n"
-                '  "quality": "pass",\n'
-                '  "score": 9,\n'
-                '  "feedback": "报告结构完整、内容准确,达到交付标准。",\n'
-                '  "final_content": ' + _json_quote(f"# {task_title}\n\n## 概述\n\n本报告由 multi-agent 工作台生成。\n\n## 结论\n\n经过 Planner、Writer、Reviewer 三阶段协作,已完成交付。") + "\n}"
+                '  "quality": "revision",\n'
+                '  "score": 5,\n'
+                '  "feedback": "正文内容单薄,缺少数据支撑与细分小节,请扩充并补充结论。",\n'
+                '  "final_content": ""\n'
+                "}"
             )
-        if "撰写" in system_text or "write" in system_text.lower() or "markdown 报告" in system_text:
+        if "报告撰写 Agent" in system_text or "writer" in system_text.lower():
+            # 若 Writer 收到评审意见(重写轮),输出带修订标记的稿子
+            if "评审意见" in user_text:
+                return (
+                    f"# {task_title}\n\n"
+                    "## 概述\n\n本报告由 multi-agent 工作台生成。\n\n"
+                    "## 正文\n\n已按评审意见修订,补充了数据支撑与结论。\n\n"
+                    "## 结论\n\n完成。"
+                )
             return (
                 f"# {task_title}\n\n"
                 "## 概述\n\n本报告由 multi-agent 工作台生成。\n\n"

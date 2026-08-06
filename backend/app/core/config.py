@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     WORKER_CONCURRENCY: int = 2
     RUN_MAX_STEPS: int = 30
     RUN_MAX_COST_USD: float = 2.00
+    # Writer 出稿后 Reviewer 不通过时最大重写轮次(不含首次出稿)
+    WORKFLOW_MAX_REWRITES: int = 3
 
     @property
     def cors_origins(self) -> list[str]:
