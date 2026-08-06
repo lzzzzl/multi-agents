@@ -9,5 +9,6 @@ from app.models.run import Run
 from app.models.run_event import RunEvent
 from app.models.run_step import RunStep
 from app.models.task import Task
+from app.models.tool_call import ToolCall
 
-__all__ = ["Task", "Run", "RunStep", "RunEvent", "Artifact"]
+__all__ = ["Task", "Run", "RunStep", "RunEvent", "Artifact", "ToolCall"]

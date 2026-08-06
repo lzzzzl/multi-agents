@@ -52,6 +52,9 @@ class Run(Base, TimestampMixin):
     artifacts: Mapped[list["Artifact"]] = relationship(  # type: ignore[name-defined]  # noqa: F821
         back_populates="run", cascade="all, delete-orphan"
     )
+    tool_calls: Mapped[list["ToolCall"]] = relationship(  # type: ignore[name-defined]  # noqa: F821
+        back_populates="run", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<Run {self.id} status={self.status}>"
