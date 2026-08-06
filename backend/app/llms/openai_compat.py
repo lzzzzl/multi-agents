@@ -78,13 +78,19 @@ class OpenAICompatProvider(LLMProvider):
             raise LLMError("LLM 返回非 JSON 响应") from exc
 
         try:
-            content = data["choices"][0]["message"]["content"]
+            message = data["choices"][0]["message"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise LLMError("LLM 响应缺少 choices/message/content 字段") from exc
+            raise LLMError("LLM 响应缺少 choices/message 字段") from exc
+
+        # 推理模型(如 deepseek-v4-flash)先输出 reasoning_content,
+        # 当 token 不足时 content 可能为空,此时回退到 reasoning_content。
+        content = message.get("content") or message.get("reasoning_content") or ""
+        if not content:
+            raise LLMError("LLM 响应 content 与 reasoning_content 均为空")
 
         usage = data.get("usage") or {}
         return LLMResult(
-            content=content or "",
+            content=content,
             usage=LLMUsage(
                 input_tokens=usage.get("prompt_tokens", 0),
                 output_tokens=usage.get("completion_tokens", 0),
