@@ -17,7 +17,15 @@ export interface Page<T> {
 }
 
 // ---- Task ----
-export type TaskStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+// 与后端对齐: draft(草稿) / queued(已入队) / running / completed / failed / cancelled / archived
+export type TaskStatus =
+  | "draft"
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "archived";
 export type Priority = "low" | "normal" | "high" | "urgent";
 
 export interface Task {
@@ -45,7 +53,7 @@ export interface TaskCreate {
 
 export interface TaskRunSummary {
   id: string;
-  status: TaskStatus;
+  status: RunStatus;
   workflow_name: string;
   created_at: string;
 }
@@ -55,8 +63,15 @@ export interface TaskDetail extends Task {
 }
 
 // ---- Run ----
-export type RunStatus = TaskStatus;
-export type RunStepStatus = "running" | "completed" | "failed" | "cancelled" | "pending";
+// 与后端对齐: queued / running / waiting_for_approval / completed / failed / cancelled
+export type RunStatus =
+  | "queued"
+  | "running"
+  | "waiting_for_approval"
+  | "completed"
+  | "failed"
+  | "cancelled";
+export type RunStepStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "skipped" | "waiting_for_approval";
 
 export interface Run {
   id: string;

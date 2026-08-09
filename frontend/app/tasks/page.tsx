@@ -10,7 +10,8 @@ import { StatusBadge } from "@/components/StatusBadge";
 
 const FILTERS: { key: string; label: string }[] = [
   { key: "", label: "全部" },
-  { key: "pending", label: "待执行" },
+  { key: "draft", label: "草稿" },
+  { key: "queued", label: "待执行" },
   { key: "running", label: "运行中" },
   { key: "completed", label: "已完成" },
   { key: "failed", label: "失败" },
@@ -76,8 +77,8 @@ export default function TaskListPage() {
   const tasks = data?.items ?? [];
   const sorted = [...tasks].sort((a, b) => {
     // 运行中的排前面，然后按优先级、时间
-    const order = { running: 0, pending: 1, failed: 2, completed: 3, cancelled: 4 };
-    const s = (order[a.status as TaskStatus] ?? 9) - (order[b.status as TaskStatus] ?? 9);
+    const order: Record<string, number> = { running: 0, queued: 1, draft: 2, waiting_for_approval: 3, failed: 4, completed: 5, cancelled: 6, archived: 7 };
+    const s = (order[a.status] ?? 9) - (order[b.status] ?? 9);
     if (s !== 0) return s;
     const p = (PRIORITY_ORDER[a.priority] ?? 9) - (PRIORITY_ORDER[b.priority] ?? 9);
     if (p !== 0) return p;

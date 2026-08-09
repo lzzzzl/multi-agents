@@ -1,14 +1,19 @@
 import type { RunStatus, TaskStatus } from "@/lib/types";
 
 const STATUS_META: Record<string, { label: string; color: string; bg: string }> = {
+  draft: { label: "草稿", color: "var(--zinc)", bg: "var(--zinc-bg)" },
+  queued: { label: "待执行", color: "var(--amber)", bg: "var(--amber-bg)" },
   pending: { label: "待执行", color: "var(--amber)", bg: "var(--amber-bg)" },
   running: { label: "运行中", color: "var(--accent)", bg: "rgba(15,118,110,0.10)" },
+  waiting_for_approval: { label: "待审批", color: "var(--amber)", bg: "var(--amber-bg)" },
   completed: { label: "已完成", color: "var(--green)", bg: "var(--green-bg)" },
   failed: { label: "失败", color: "var(--red)", bg: "var(--red-bg)" },
   cancelled: { label: "已取消", color: "var(--zinc)", bg: "var(--zinc-bg)" },
+  archived: { label: "已归档", color: "var(--zinc)", bg: "var(--zinc-bg)" },
+  skipped: { label: "已跳过", color: "var(--zinc)", bg: "var(--zinc-bg)" },
 };
 
-export function StatusBadge({ status }: { status: TaskStatus | RunStatus }) {
+export function StatusBadge({ status }: { status: TaskStatus | RunStatus | string }) {
   const meta = STATUS_META[status] ?? { label: status, color: "var(--zinc)", bg: "var(--zinc-bg)" };
   return (
     <span

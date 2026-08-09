@@ -53,7 +53,9 @@ export function useRunEvents(runId: string, runStatus: RunStatus | undefined) {
     const es = new EventSource(sseUrl(runId, lastSeqRef.current));
     esRef.current = es;
 
-    es.onmessage = (msg) => {
+    // 后端发送的是命名事件 "run_event"(sse-starlette 的 event 字段),
+    // 必须用 addEventListener 监听,而非 onmessage(后者只收默认无名事件)。
+    const onEvent = (msg: MessageEvent) => {
       try {
         const ev = JSON.parse(msg.data) as RunEvent;
         setEvents((prev) => {
@@ -69,12 +71,14 @@ export function useRunEvents(runId: string, runStatus: RunStatus | undefined) {
         // 忽略无法解析的消息
       }
     };
+    es.addEventListener("run_event", onEvent);
 
     es.onerror = () => {
       // EventSource 会自动重连；终态后由上层关闭
     };
 
     return () => {
+      es.removeEventListener("run_event", onEvent);
       es.close();
       esRef.current = null;
     };
