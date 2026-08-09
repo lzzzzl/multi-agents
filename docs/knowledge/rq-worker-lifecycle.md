@@ -1,122 +1,61 @@
-# 知识文档：RQ 队列与 Worker 生命周期
+# 知识点：长任务异步化与 Worker 生命周期
 
-> 对应代码：`backend/app/workers/queue.py`、`backend/app/workers/run_worker.py`
+这一类知识点解决**如何把"耗时任务"从 HTTP 请求里剥离出来，在后台可靠地执行并保持可观测**。
 
-## 1. 为什么要把长任务放进 Worker
+## 1. 核心思想：API 只"接单"，重活交给后台 Worker
 
-Agent workflow 是耗时操作（多次 LLM 调用），不能阻塞 HTTP 请求。职责划分：
+**知识点**：耗时的 Agent 编排不能堵在 HTTP 请求里。职责切分是——**API 创建记录、立即投递后台任务、马上返回**；**Worker 消费队列、执行真实流程、持续写进度**。
 
-- **API**：创建 Task / Run，投递后台 job，立即返回。
-- **Worker**：消费队列，加载 run，执行真实 workflow，持续写事件。
+**为什么**：Agent 流程要多次调模型，可能几十秒到几分钟。堵在请求里会导致超时、前端卡死、请求堆满。
 
-## 2. 选择的队列：RQ
+**可复用规则**：凡是"发起后要等很久才有结果"的操作，都应该 **"登记 + 异步执行 + 轮询/订阅结果"**，而不是同步等。
 
-项目最终选择 **RQ**（Redis Queue），配置在 `queue.py`：
+## 2. 选队列的取舍：轻量优先
 
-```python
-from redis import Redis
-from rq import Queue
-from app.core.config import settings
+**知识点**：任务队列（RQ / Celery / Dramatiq）本质是把"要执行的工作"存到中间件，Worker 取出来执行。**对于 MVP 阶段、单机、简单场景，选最轻的实现**（本项目选 RQ + Redis）。
 
-_redis = Redis.from_url(settings.REDIS_URL, decode_responses=False)
-runs_queue = Queue("runs", connection=_redis)
+**为什么**：
+- 队列越重，运维和心智成本越高（Celery 要配 broker、beat、多个 worker）。
+- MVP 阶段没有复杂调度需求，RQ 够用且简单。
 
-def get_queue() -> Queue:
-    return runs_queue
-```
+**可复用规则**：**先选最简单的能满足当前需求的方案**，别为想象中的复杂场景提前上重型框架。复杂度留给真正需要时再引入。
 
-启动 worker：
+## 3. 用一个"状态机"表达任务的一生
 
-```bash
-cd backend
-uv run rq worker runs
-```
+**知识点**：任务从提交到结束，用一组**明确的状态**表达：排队 → 运行中 → 成功 / 失败（+ 取消）。任何时刻都知道任务处于哪一步。
 
-> ⚠️ **文档与实现不一致提示**：`development-guide.md` 里仍并列写了 RQ 和 Celery 两套启动命令，实际已定用 RQ。建议后续更新 `development-guide.md`，删掉 Celery 分支，避免维护歧义。
+**为什么**：状态是前端展示、后台调度、故障排查的共同语言。没有状态机，就无法回答"这个任务现在怎么样"。
 
-## 3. Worker 的执行入口：`execute_run(run_id)`
+**可复用规则**：给任务定义**状态集 + 合法转换**，关键状态变化要落库/落事件（可观测），而不是只存在于内存或 Worker 的局部变量里。
 
-由 RQ 调用，整体流程：
+## 4. 成功与失败都要"留痕"
 
-```python
-def execute_run(run_id: str) -> None:
-    db = SessionLocal()
-    try:
-        run = db.get(Run, run_id)
-        if not run:
-            logger.error(...); return
-        if run.status == "cancelled":
-            logger.info("already cancelled, skip"); return
+**知识点**：任务无论成功还是失败，都要把**结果/原因**写下来——成功存产出摘要与成本，失败存错误信息，并追加对应事件。
 
-        # 1. 标记 running
-        run.status = "running"
-        run.started_at = _now()
-        db.commit()
+**为什么**：没有留痕，用户只能看到"卡住了"，无法知道"卡在哪、为什么、失败了结果是啥"。
 
-        # 2. 执行真实 workflow
-        workflow = SequentialWorkflow()
-        try:
-            summary = workflow.execute(db, run_id)
-            if summary.get("cancelled"):
-                return
-            _append_event(db, run_id, type="run_completed",
-                          payload={"artifact_id": summary["artifact_id"]})
-            run.status = "completed"
-            run.completed_at = _now()
-            run.output_summary = {...}
-            run.cost_summary = {...}
-            db.commit()
-        except Exception as exc:
-            logger.exception(...)
-            run.status = "failed"
-            run.failed_at = _now()
-            run.error_message = str(exc)
-            db.commit()
-            _append_event(db, run_id, type="run_failed",
-                          payload={"error": str(exc)})
-    finally:
-        db.close()
-```
+**可复用规则**：**异常绝不静默**。失败要记录错误信息、写失败事件；成功要记录产出和成本。这样才支持排查和回放。
 
-## 4. Run 状态机
+## 5. 可重入与取消：往"边界"想
 
-```txt
-queued -> running -> completed
-                  \-> failed
-queued -> cancelled（跳过执行）
-```
+**知识点**：
+- **可重入**：Worker 开始前先检查任务是否已取消/已处理，避免重复执行。
+- **取消粒度**：只在步骤边界检查取消信号，进行中的调用不强中断。
 
-- 创建 run 时由 API 置为 `queued` 并投递 job。
-- Worker 开始时置 `running`。
-- 成功后置 `completed` 并写 `run_completed` 事件。
-- 异常时置 `failed`、记 `error_message`、写 `run_failed` 事件。
-- 已取消的 run 直接跳过（不执行）。
+**为什么**：任务可能被重复投递，也可能被用户取消。处理好"幂等"和"优雅退出"，系统才可靠。
 
-## 5. Worker 记录了什么
+**可复用规则**：消费方要**先检查再执行**（幂等），取消要选**安全边界**（见重写循环知识点）。
 
-- `run.started_at / completed_at / failed_at`：时间点。
-- `run.output_summary`：`{artifact_id, steps}`。
-- `run.cost_summary`：`{input_tokens, output_tokens, estimated_cost}`。
-- `run.error_message`：失败原因。
-- 事件由 workflow 内部写入（step/agent/artifact），worker 只补 `run_completed` / `run_failed`。
+## 6. 排查长任务问题的顺序
 
-## 6. 已知取舍
+**知识点**：任务出问题时，按"总状态 → 步骤 → 事件流 → 日志"逐层定位，而不是直接翻日志。
 
-- **`_append_event` 在 worker 和 workflow 里各有一份**：事件 sequence 计算逻辑重复。可抽成 `EventService` 统一管理。
-- **单 worker / 单队列**：`WORKER_CONCURRENCY` 当前未在 worker 侧真正生效到并发执行，后续可加多 worker 水平扩展。
-- **取消只保证 step 边界**：worker 靠 workflow 内部的 `_check_cancelled` 在 step 边界感知取消，不中断进行中的 LLM 调用。
+**可复用规则**：
+1. 看**任务总状态**（是在哪一档）。
+2. 看**步骤**（卡在哪个 Agent）。
+3. 看**事件流**（序号到哪了、最后发生了什么）。
+4. 看 **Worker 日志**（异常栈）。
 
-## 7. 排查建议
+## 7. 一句话总结
 
-run 卡住或失败时，按这个顺序看：
-
-1. `runs.status` —— 总状态。
-2. `run_steps` —— 卡在哪个 step。
-3. `run_events` —— sequence 到哪了。
-4. worker 日志 —— 异常栈（`logger.exception` 会打印）。
-
-## 8. 后续改进
-
-- 把 `_append_event` 收敛到 service，避免跨模块重复。
-- 支持从失败 step 重试（当前重试方式是新建 run）。
-- 接入取消/审批控制信号（当前只有取消检查）。
+长任务异步化的正确姿势是：**API 接单异步投递 + 轻量队列 + 状态机表达生命周期 + 成败都留痕 + 幂等与边界取消 + 由总到细逐层排查**。

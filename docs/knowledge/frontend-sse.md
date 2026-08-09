@@ -1,114 +1,61 @@
-# 知识文档：前端 SSE 实时事件流
+# 知识点：前端实时事件流（历史 + 增量）
 
-> 对应代码：`frontend/lib/api.ts`、`frontend/lib/useRunEvents.ts`、`frontend/components/RunTimeline.tsx`
+这一类知识点解决**如何在大屏/运行台上实时展示"正在发生什么"，同时保证刷新后不丢历史、断网不重不漏**。
 
-## 1. 实时方案：REST 拉历史 + SSE 增量
+## 1. 核心思想：REST 拉历史 + SSE 增量，而不是纯 SSE
 
-后端事件全部落库（`run_events`），前端采取"**先 REST 拉历史，再 SSE 增量**"的混合方案，而不是纯 SSE。这样页面刷新后能从历史事件完整恢复状态。
+**知识点**：客户端实时展示事件，采用**两段式**：进入页面先用普通请求拉全量历史事件恢复状态，再用 SSE 长连接接收**增量**事件。纯 SSE 无法在刷新后恢复历史。
 
-## 2. API 客户端（`api.ts`）
+**为什么**：
+- 刷新/打开页面时，如果只靠 SSE，会错过刷新前的事件。
+- 先拉历史能保证"页面状态完整"，SSE 只负责"从当前游标往后的新事件"。
 
-- 基地址 `API_BASE`，默认 `http://localhost:8000`，可用 `NEXT_PUBLIC_API_BASE` 覆盖。
-- 统一 `request<T>` 包装：解析 `{data, error}`，非 2xx 或 `body.error` 时抛 `ApiClientError`（带 `code`/`message`/`details`）。
-- 事件列表接口支持 `after_sequence` 增量拉取：
+**可复用规则**：**实时界面 = 历史铺底 + 增量追加**。任何"实时看板"都值得按这个思路设计，而不是迷信纯推送。
 
-```typescript
-listEvents: (runId, afterSequence?) => request(`/api/runs/${runId}/events${q}`)
-```
+## 2. 用"游标"做增量：只拉没见过的
 
-- SSE 地址构造：
+**知识点**：SSE 连接 / 增量拉取都带上**游标**（这里用 `after_sequence`，即"我已有到第几条"），只要游标之后的数据。
 
-```typescript
-export function sseUrl(runId, afterSequence?) {
-  const q = afterSequence ? `?after_sequence=${afterSequence}` : "";
-  return `${API_BASE}/api/runs/${runId}/events/stream${q}`;
-}
-```
+**为什么**：不带游标会重复拉已看过的事件，浪费带宽且易乱序、重复。
 
-## 3. `useRunEvents`：三个阶段的 hook
+**可复用规则**：增量同步要有一个**单调递增的游标**（事件序号 / 时间戳 / ID），告诉服务端"从哪里继续"。这是"断点续传、不重不漏"的基础。
 
-```typescript
-const TERMINAL = ["completed", "failed", "cancelled"];
-```
+## 3. 事件要"幂等合并"：按唯一 ID 去重
 
-### 阶段 1：REST 拉历史 + 合并去重
+**知识点**：无论历史拉取还是 SSE 推送，合并本地事件列表时都要**按事件唯一 ID 去重**，并**按序号排序**。
 
-```typescript
-const page = await api.listEvents(runId);
-setEvents(prev => {
-  const seen = new Set(prev.map(e => e.id));
-  const merged = [...prev, ...page.items.filter(e => !seen.has(e.id))]
-    .sort((a, b) => a.sequence - b.sequence);
-  lastSeqRef.current = merged.length ? merged[merged.length - 1].sequence : 0;
-  return merged;
-});
-```
+**为什么**：历史与实时之间、断线重连之间，同一事件可能被收两次。去重保证不重复渲染，排序保证时间线正确。
 
-- 用事件 `id` 去重（避免与后续 SSE 重复）。
-- 按 `sequence` 排序。
-- 维护 `lastSeqRef` 作为 SSE 的起点游标。
+**可复用规则**：**合并策略 = 按 ID 去重 + 按序号排序**。这是增量同步的通用保险，成本极低，收益是杜绝重复和乱序。
 
-### 阶段 2：建立 SSE 长连接
+## 4. 断线重连：让框架自带的能力接管
 
-只在**未到终态**且**历史已加载**时才建连：
+**知识点**：浏览器原生 `EventSource` 自带自动重连，重连时带上游标即可无缝续传。**不要自己写复杂的重连逻辑去打断它**。
 
-```typescript
-if (!runId || !runStatus || TERMINAL.includes(runStatus)) return;
-if (!historyLoaded) return;
-const es = new EventSource(sseUrl(runId, lastSeqRef.current));
-```
+**为什么**：自写重连容易引入重复、风暴、状态错乱。原生重连 + 游标续传已足够可靠。
 
-`onmessage` 里再次按 `id` 去重，新事件追加并更新 `lastSeqRef`：
+**可复用规则**：能用平台/框架自带重连就不要自己造轮子。你的职责是保证"重连后从正确游标继续 + 去重"，而不是重新实现重连。
 
-```typescript
-es.onmessage = (msg) => {
-  const ev = JSON.parse(msg.data) as RunEvent;
-  setEvents(prev => {
-    if (prev.some(e => e.id === ev.id)) {
-      lastSeqRef.current = Math.max(lastSeqRef.current, ev.sequence);
-      return prev;
-    }
-    const next = [...prev, ev];
-    lastSeqRef.current = ev.sequence;
-    return next;
-  });
-};
-```
+## 5. 到终态就关连接，别空挂着
 
-无法解析的消息直接忽略（`try/catch`）。
+**知识点**：任务到达终态（成功/失败/取消）后，应**主动关闭 SSE 连接**，停止无意义的持续接收。
 
-### 阶段 3：到达终态自动关闭
+**为什么**：终态后不会再产生新事件，挂着连接浪费资源，还会不断触发无意义的重连。
 
-```typescript
-useEffect(() => {
-  if (runStatus && TERMINAL.includes(runStatus)) {
-    esRef.current?.close();
-    esRef.current = null;
-  }
-}, [runStatus]);
-```
+**可复用规则**：**订阅的生命周期要绑定到"是否还可能产生新事件"**。终态即关，干净利落。
 
-连接释放通过 effect cleanup 的 `es.close()` 保证。
+## 6. 原生 EventSource 的边界
 
-## 4. 断线重连策略
+**知识点**：原生 `EventSource` 只支持 **GET + 单向 + 无法自定义请求头**。
 
-- **不加自定义重连**：`EventSource` 自带自动重连，`onerror` 里不主动 close（避免打断原生重连）。
-- 重连时会带上 `?after_sequence=lastSeqRef.current`，后端只推游标之后的事件，配合前端按 `id` 去重，保证**不丢、不重**。
-- 终态后由上层关闭连接，停止无意义的重连。
+**可复用规则**：当需要鉴权头、POST 订阅、双向通信时，原生 EventSource 不够用，要改用 `fetch + ReadableStream` 或 WebSocket。**先看清需求再选工具**，别在不支持的场景硬用。
 
-## 5. 附带一个节流 hook
+## 7. 渲染的"状态感"：区分实时与静态
 
-`useRunEvents.ts` 里还导出了 `useThrottle`，用于高频更新（如进行中的状态）限流渲染，避免每帧都重渲染。
+**知识点**：时间线渲染时，用颜色/图标/高亮区分不同事件类型，并给"正在进行的最后一条事件"一个 live 高亮，让用户直觉感到"这是在实时动的"。
 
-## 6. Timeline 渲染（`RunTimeline.tsx`）
+**可复用规则**：实时界面要**可视化"实时感"**——高亮当前节点、显示"监听中"、对不同状态着色，而不是把新旧事件同等对待。
 
-- **图标**：按事件类型映射 SVG（step 加减号、完成对勾、agent 气泡、artifact 文档、run 完成/失败/取消等）。
-- **颜色**：按事件名关键词着色——`failed` 红、`cancelled` 灰、`completed` 绿、`message` 强调色。
-- **live 高亮**：当某事件 `sequence` 等于最后一个事件时打 `dot-live` 类，配合底部"监听中…"指示实时状态。
-- **payload 渲染优先级**：`content`（Agent 正文）→ step 的 `name` → `artifact_id`（产物链）→ `error`（错误）→ 其余字段 JSON 格式化展示。
+## 8. 一句话总结
 
-## 7. 已知取舍与改进方向
-
-- **SSE 用浏览器原生 `EventSource`**：只支持 GET + 单向，无法认证头。若后端需要鉴权，需改用 `fetch` + `ReadableStream` 或 WebSocket。
-- **依赖 `runStatus` 是否到终态来控制开关**：若 run 状态是"进行中但不产生新事件"，连接会一直挂着，可加 idle 超时。
-- **events 全量存在组件 state**：长 run 事件很多时内存和渲染压力大，可考虑虚拟列表或分页。
+前端实时事件流的正确姿势是：**历史铺底 + SSE 增量 + 单调游标 + ID 去重排序 + 用框架自带重连 + 终态即关闭 + 渲染出实时感**。

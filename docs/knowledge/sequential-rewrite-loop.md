@@ -1,122 +1,66 @@
-# 知识文档：SequentialWorkflow 的 Writer→Reviewer 重写循环
+# 知识点：多 Agent 编排里的"自动重写循环"
 
-> 对应代码：`backend/app/workflows/sequential.py`
-> 配套测试：`backend/tests/test_workflow.py`
+这一类知识点解决**如何让 Agent 产出达到质量门槛，而不是"跑一遍就交稿"**。
 
-## 1. 流程总览
+## 1. 核心思想：用"生成 ⇄ 评审"闭环代替单次生成
 
-`SequentialWorkflow`（`name = "sequential_report"`，`version = "1.1.0"`）编排三个 Agent：
+**知识点**：多 Agent 编排不应是"Planner → Writer → 结束"，而应引入 Reviewer 做质量闸门，不达标就把反馈回传给 Writer 重写，形成**闭环**。代表了一种"质量由流程保证，而非碰运气"的设计观。
 
-```txt
-Planner
-  -> (Writer -> Reviewer)*  直到 quality == "pass" 或达到最大重写轮次
-  -> 生成 Markdown Artifact
-```
+**为什么**：单次 LLM 生成质量不稳定。与其相信模型一次写对，不如让"评审—修改"循环收敛到可接受质量。
 
-不是简单的"走一遍就完"，而是引入**自动重写循环**：Writer 出稿后由 Reviewer 评审，若 `quality == "revision"`，把评审反馈连同上一稿回传给 Writer 重写，循环直到通过或达到上限。
+**可复用规则**：凡是"生成式产出要交付"的场景（报告、代码、文案），都值得加一个评审环节做闭环，而不是接受首版。
 
-## 2. 两个关键控制量
+## 2. 必须给循环加上限：防失控、防烧钱
 
-- `WORKFLOW_MAX_REWRITES`（`config.py`，默认 `3`）：**不含首次出稿**的最大重写轮次。
-- 构造时可用 `max_rewrites` 覆盖配置值（测试里用 `SequentialWorkflow(max_rewrites=0/2)` 精确控制）。
+**知识点**：重写循环**必须设最大轮次**，否则可能无限循环，token 和费用失控。
 
-首轮 Writer 出稿后每轮都由 **Writer + Reviewer 一对**组成。所以总步数 = `1 (Planner) + 2 * (1 + rewrites)`，重写轮次用 `steps // 2 - 1` 反推。
+**为什么**：模型可能永远不"通过"，或评审规则本身有缺陷。没有上限，一次 run 会无限烧钱、无限占用资源。
 
-## 3. 每个 Agent 步骤做什么
+**可复用规则**：所有循环（重写、重试、自愈）都要有**轮次上限 + 达到上限后的明确行为**（本项目是记录 warning 并带上当前质量收尾，不是抛错）。
 
-`_run_agent_step` 统一负责一个 Agent 的执行与记录：
+## 3. 评审输出要"可判定"，并给出定稿
 
-1. 创建 `RunStep`（agent_id、name、type=agent、status=running、sequence、started_at）。
-2. 写 `step_started` 事件。
-3. 调 `agent.run(ctx)` 得到 `AgentResult`。
-4. 标记 step completed，把 `output`、token/model/latency 写入 `step.metadata_`。
-5. 写 `agent_message` 事件（含 `content` / `agent` / `output`）。
-6. 写 `step_completed` 事件。
+**知识点**：Reviewer 的输出不能只是"我觉得还行"，要结构化：一个**可判定的结论**（pass/revision）+ 评分 + 具体反馈 + **定稿内容**。
 
-```python
-step.metadata_ = {
-    "input_tokens": result.usage.input_tokens,
-    "output_tokens": result.usage.output_tokens,
-    "model": result.usage.model,
-    "latency_ms": result.latency_ms,
-}
-```
+**为什么**：
+- 可判定结论让编排层能做 if/else（通过则停、不通过则重写）。
+- 具体反馈让 Writer 知道改什么。
+- 定稿内容保证即使评审对正文做了修正，最终交付的也是修正后的版本。
 
-## 4. 重写循环的判定与内容回退
+**可复用规则**：在设计评审/审查类 Agent 时，让它同时产出"结论 + 依据 + 定稿"，而不是只给一句评价。
 
-核心逻辑：
+## 4. 内容回退链：定稿优先评审，其次生成者
 
-```python
-quality = "revision"
-for round_no in range(self._max_rewrites + 1):
-    if self._check_cancelled(db, run_id):
-        return {"cancelled": True}
-    suffix = "" if round_no == 0 else f"·修改{round_no}"
+**知识点**：最终交付内容要按优先级取：**评审的定稿 → 生成者的正文 → 兜底空串**。评审可能修正过内容，所以定稿优先。
 
-    writer_result = self._run_agent_step(...)     # Writer 出稿/重写
-    reviewer_result = self._run_agent_step(...)   # Reviewer 评审
+**为什么**：如果只取 Writer 的稿子，会丢掉 Reviewer 的修正；如果强依赖评审一定给定稿，遇到空定稿又没兜底会崩。
 
-    quality = reviewer_result.output.get("quality") or "revision"
-    final_content = (
-        reviewer_result.output.get("final_content")
-        or writer_result.output.get("markdown")
-        or writer_result.output.get("content")
-        or ""
-    )
-    if quality == "pass":
-        break
-    if round_no >= self._max_rewrites:
-        break   # 达到上限，即使 revision 也停
-```
+**可复用规则**：多 Agent 交接产物时，定义清晰的**取值优先级**，并对每一步做空值兜底，避免"某个 Agent 偷懒返回空"导致整条线崩。
 
-**`final_content` 的回退链**（重要）：优先 Reviewer 的 `final_content`（定稿），否则取 Writer 的 `markdown`，再否则 `content`。因为 Reviewer 可能修正过内容，定稿以评审为准。
+## 5. 跨轮次上下文传递：用"上一阶段的输出字典"
 
-## 5. 上下文如何传递
+**知识点**：要让 Writer 知道评审意见、让 Reviewer 拿到 Writer 的稿，编排层需要一个**跨轮次传递结果的通道**（按 agent 名存输出），而不是让每个 Agent 自己维护状态。
 
-`_make_context` 构造 `AgentContext`，通过 `previous` 字典在轮次间传递各自的输出：
+**为什么**：Agent 是无状态的。它需要的信息（上一稿、评审意见）必须由编排层显式注入，否则 Agent 不知道"改谁"。
 
-- `previous["agent_planner"]`：计划，喂给 Writer。
-- `previous["agent_writer"]`：上一篇稿子，喂给 Reviewer 和重写时的 Writer。
-- `previous["agent_reviewer"]`：评审意见，喂给重写时的 Writer（`writer.py` 据此带上"上一稿评审意见"和"上一稿内容"）。
+**可复用规则**：编排层才是"上下文所有者"。它决定每个 Agent 看到什么、上一步的输出传给谁。这保持了 Agent 的无状态和可复用。
 
-Writer 重写时（见 `writer.py`）若 review 的 `quality == "revision"`，会把 feedback 和上一稿拼进 user prompt，要求"保留有价值内容，针对意见修改后重新输出完整正文"。
+## 6. 取消要在"步骤边界"生效
 
-## 6. 取消检查
+**知识点**：长流程里用户取消，编排层应在**每个步骤边界检查**取消信号，命中最外层标记"已取消"并走干净的退出路径。
 
-在每个 step 边界用 `_check_cancelled` 检查 run 是否已取消（`run.status == "cancelled"`），命中则返回 `{"cancelled": True}`，由 worker 跳过收尾。**只保证 step 边界生效**，不做运行中强行中断。
+**为什么**：进行中的 LLM 调用不便强中断，边界的粒度是"安全、可预测、实现简单"的折中。
 
-## 7. 事件序列的生成
+**可复用规则**：取消/中断不要追求"运行中立即杀死"，而是"在安全的步骤边界优雅退出"。粒度选在哪儿，决定实现难度和体验，先取边界。
 
-`_append_event` 用数据库聚合计算下一次 `sequence`：
+## 7. 可观测：每一步"发生了什么"要能被重建
 
-```python
-current_max = db.scalar(select(func.max(RunEvent.sequence)).where(RunEvent.run_id == run_id))
-next_seq = (current_max or 0) + 1
-```
+**知识点**：编排层要为每个 Agent 步骤记录状态、输入输出摘要、token/耗时，并追加到一条**单调递增的事件流**。
 
-保证单 run 内 `sequence` 单调递增，前端 SSE 拿它当游标。
+**为什么**：多 Agent 流程黑盒，出事必须能定位"卡在哪个 Agent、哪一步、花了多少"。事件流既是前端实时展示的来源，也是事后回放的依据。
 
-## 8. 成本估算
+**可复用规则**：事件流用**单调递增序号**做游标，配合"追加不改写"原则，前端可增量拉取、可断点续传（详见前端 SSE 知识点）。
 
-`_estimate_cost` 用固定单价做简化估算（元）：
+## 8. 一句话总结
 
-```python
-return round(input_tokens / 1_000_000 * 0.5 + output_tokens / 1_000_000 * 2.0, 4)
-```
-
-注意：不同模型价格不同，这只是占位估算，后续应接入按模型定价。
-
-## 9. 测试要点（`test_workflow.py`）
-
-用 `MagicMock` 伪造 session + `MockLLMProvider`，不依赖数据库：
-
-- `max_rewrites=2` → 预期 5 步、`rewrites == 1`、`quality == "pass"`、有 artifact_id。
-- `max_rewrites=0` → 首次评审即 revision 且不允许重写 → 3 步、`rewrites == 0`、`quality == "revision"`、仍有 artifact_id。
-
-伪造 db 需要 mock `get`、`scalar`（返回值 None 作为 sequence 基线）、`refresh`（为无主键对象补 `fake_xxx` 主键）。
-
-## 10. 已知取舍与改进方向
-
-- **达到上限后仍以 revision 收尾并生成 artifact**：当前不抛错，只是 warning。可考虑"未达标"时标记 run 为 failed 或加人工审批。
-- **`previous` 只存最近一轮**：`agent_writer` / `agent_reviewer` 会被覆盖，历史轮次的稿子不可见。如需审计完整修订历史，应把每轮存档。
-- **`_append_event` 的 sequence 用聚合查询**：并发写会有竞态，当前单 worker 场景可接受，多 worker 需加唯一约束或改用序列。
+自动重写循环的正确姿势是：**生成⇄评审闭环 + 轮次上限 + 可判定的评审输出 + 内容回退链 + 编排层管上下文 + 边界取消 + 完整可观测事件流**。

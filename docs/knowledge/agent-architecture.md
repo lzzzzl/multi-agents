@@ -1,124 +1,66 @@
-# 知识文档：Agent 抽象与职责划分
+# 知识点：如何设计一个"可编排、可复用"的 Agent 单元
 
-> 对应代码：`backend/app/agents/`（`base.py`、`planner.py`、`writer.py`、`reviewer.py`、`_json.py`）
+这一类知识点解决**如何把 Agent 设计成干净的积木，而不是和流程纠缠在一起的一团代码**。
 
-## 1. 核心设计决策：Agent 保持"纯粹"
+## 1. 职责分离：Agent 只管"输入→推理→输出"，别碰流程
 
-`BaseAgent` 只负责三件事：
+**知识点**：一个 Agent 单元只做三件事——**构造提示词、调用模型、把输出解析成结构化结果**。步骤的创建、事件写入、成本统计这些流程性工作，全部交给编排层。
 
-1. 构造放入 LLM 的 prompt（system prompt + user prompt）。
-2. 调用 LLM。
-3. 把原始输出解析为结构化 `output`。
+**为什么**：
+- 职责单一，Agent 可独立测试（不需要数据库）。
+- 编排层可以自由调序、复用同一个 Agent。
+- 出错好定位：是提示词问题还是解析问题，边界清晰。
 
-**步骤生命周期（创建 RunStep、写 run_events、成本汇总）全部由上层 workflow 统一管理**，Agent 不碰数据库。这样：
+**可复用规则**：**"做什么"（Agent）和"怎么编排记录"（编排层）分离**。凡是 Agent 里出现"建步骤、写事件、碰数据库"的痕迹，就是在越界。
 
-- Agent 可以独立单元测试（不依赖数据库）。
-- workflow 可以自由编排、复用一个 Agent。
-- 职责单一，Agent 失败时容易定位到是 prompt 问题还是解析问题。
+## 2. 用"契约"定义 Agent 的输入输出
 
-## 2. 两个契约类型
+**知识点**：Agent 之间不直接互相调用，而是通过**明确定义的输入上下文和输出结果**协作。输入是"上下文"（run、task、输入快照、前置输出），输出是"结果"（结构化 output + 用量 + 耗时）。
 
-```python
-@dataclass
-class AgentContext:
-    run: Run
-    task: Task
-    input: dict[str, Any]          # 该 run 的输入快照
-    previous: dict[str, dict[str, Any]] = ...  # agent_id -> output（跨轮次传递）
+**为什么**：只有走契约，编排层才能把 A 的输出喂给 B，才能统一记账和展示。
 
-@dataclass
-class AgentResult:
-    agent_id: str
-    name: str
-    message: str                    # 展示给用户的总结文本
-    output: dict[str, Any]          # 结构化输出，workflow 据此消费
-    usage: LLMUsage = ...
-    latency_ms: int = 0
-```
+**可复用规则**：给 Agent 定义**稳定的输入口和输出口**。输出尽量结构化（dict），而不是自由文本，这样下游能稳定消费、可校验。
 
-`previous` 是 Agent 之间传递结果的通道，例如 `previous["agent_planner"]`、`previous["agent_writer"]`、`previous["agent_reviewer"]`。
+## 3. 结构化输出 > 自由文本
 
-## 3. BaseAgent 骨架
+**知识点**：Agent 直接吐 JSON/结构化结果，而不是让人去解析"它说了啥"。
 
-```python
-class BaseAgent(ABC):
-    agent_id: str        # 如 "agent_planner"
-    name: str            # 如 "Planner"
-    system_prompt: str
+**为什么**：
+- 结构化结果可被编排层做 if/else（如 reviewer 的 pass/revision）。
+- 可校验：字段缺失、类型错可以明确报错。
+- 可测试、可快照。
 
-    @abstractmethod
-    def build_user_prompt(self, ctx: AgentContext) -> str: ...
+**可复用规则**：
+- 每个 Agent 的 system prompt 里**明确输出格式**（什么字段、什么取值）。
+- 解析层做**归一化 + 兜底**（缺字段给默认值、非法值报错），而不是相信模型永远守规矩。
 
-    def parse(self, content: str) -> dict[str, Any]:
-        return {"content": content}   # 默认原样包裹
+## 4. 容错解析：模型不总是守格式
 
-    def run(self, ctx: AgentContext) -> AgentResult:
-        llm = get_llm_provider()
-        messages = [
-            LLMMessage(role="system", content=self.system_prompt),
-            LLMMessage(role="user", content=self.build_user_prompt(ctx)),
-        ]
-        result = llm.chat(messages)
-        return AgentResult(
-            agent_id=self.agent_id,
-            name=self.name,
-            message=result.content,
-            output=self.parse(result.content),
-            usage=result.usage,
-            latency_ms=result.latency_ms,
-        )
-```
+**知识点**：模型常输出 Markdown 代码块包裹、或夹杂多余文字。解析层要**容忍这些干扰**，剥掉代码块、截取合法 JSON 片段，实在不行才报错。
 
-子类只需实现 `build_user_prompt`，并按需覆写 `parse`。
+**为什么**：如果解析一次失败就整条线崩，太脆弱。模型输出脏是常态，解析层要扛住常见脏格式。
 
-## 4. 三个 Agent 的 parse 差异
+**可复用规则**：解析遵循"**先修后报**"：能修的脏格式（剥代码块、截 `{}` 区间）先修，修不了才抛错。报错要带"这是谁的输出"的上下文，方便定位 Agent。
 
-| Agent | `parse` 行为 |
-|---|---|
-| Planner | 用 `load_json` 解析，归一化 `steps`（补 `sequence`、兜底 `name`/`description`），无合法 steps 抛 `LLMError` |
-| Writer | 去掉可能包裹的 ``` 代码块，返回 `{"markdown": text}` |
-| Reviewer | 用 `load_json` 解析，校验 `quality` 只能是 `pass`/`revision`，否则抛 `LLMError` |
+## 5. Agent 保持无状态：上下文由编排层注入
 
-结构化约定：
-- Planner 输出 `{"steps": [{"name", "description"}]}`。
-- Reviewer 输出 `{"quality", "score", "feedback", "final_content"}`。
+**知识点**：Agent 不保存"上一步发生了什么"，它需要的信息（上一稿、评审意见）由编排层显式传入上下文。
 
-## 5. 容错 JSON 解析器（`_json.py`）
+**为什么**：有状态的 Agent 无法复用、无法重放、难以测试。无状态才能当积木随便拼。
 
-模型常输出带 Markdown 代码块或夹杂多余文字，`load_json` 做了容错：
+**可复用规则**：**状态放编排层，Agent 只读上下文**。让 Agent"拿到什么算什么"，而不是"记得什么算什么"。
 
-```python
-def load_json(content, *, what="Agent 输出"):
-    text = content.strip()
-    if text.startswith("```"):            # 剥掉 ```json 包裹
-        text = text[text.find("\n") + 1:]
-        if text.endswith("```"):
-            text = text[:-3].strip()
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        start, end = text.find("{"), text.rfind("}")   # 退一步截取最外层 {...}
-        if start != -1 and end > start:
-            data = json.loads(text[start:end + 1])
-        else:
-            raise LLMError(f"{what}不是合法 JSON")
-    if not isinstance(data, dict):
-        raise LLMError(f"{what}不是 JSON 对象")
-    return data
-```
+## 6. 扩展一个新 Agent 的 checklist
 
-**注意**：JSON 非法的 Agent 输出会抛 `LLMError`，由 workflow 走异常路径（当前整体标记 run failed）。后续可加"修复重试"策略。
+新增一个 Agent 时，按这套顺序走，保证它符合上述原则：
 
-## 6. 测试要点（`test_agents.py`）
+1. 定义它的**输出 schema 约定**（字段、取值）。
+2. 写好 **system prompt**，明确输出格式。
+3. 实现**用户提示词构造**和**解析**（含归一化与兜底）。
+4. 在 mock 里加对应角色的行为（见 Mock 知识点）。
+5. 加**解析层**的单元测试（含脏输入）。
+6. 在编排层接入并配置上下文传递。
 
-- 用 `patch("app.agents.base.get_llm_provider", return_value=MockLLMProvider(latency_ms=0))`，不依赖真实模型与数据库。
-- 直接测 `parse` 的容错：非法 JSON 抛 `LLMError`；带 ```json 包裹的能解析成功。
-- 用 `_make_context` 构造最小 `AgentContext`（Task + Run + input + previous）。
+## 7. 一句话总结
 
-## 7. 扩展一个新 Agent 的步骤
-
-1. 定义输出 schema 约定（见上面三类的结构化输出）。
-2. 继承 `BaseAgent`，写 `system_prompt` 和 `build_user_prompt`，必要时覆写 `parse`。
-3. 在 mock 里加对应角色的关键词分支（见 `llm-mock-provider.md`）。
-4. 加 `parse` 单元测试。
-5. 在 workflow 里编排并传 `previous` 上下文。
+设计 Agent 单元的正确姿势是：**只做提示词+推理+解析 / 用契约协作 / 结构化输出 / 容错解析 / 保持无状态**。

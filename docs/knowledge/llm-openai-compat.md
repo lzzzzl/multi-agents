@@ -1,164 +1,71 @@
-# 知识文档：LLM Provider 抽象与 OpenAI 兼容接入
+# 知识点：LLM 接入层的设计原则与坑
 
-> 本文是**实现记录**，讲"实际怎么做的、踩过什么坑"，与 `technical-architecture.md`（设计稿）互补。
-> 对应代码：`backend/app/llms/`、`backend/app/core/config.py`
+这一类知识点解决一个问题：**如何让一个多 Agent 系统接入多种大模型，同时保持业务层稳定、可测试、可观测**。
 
-## 1. 为什么做抽象层
+## 1. 抽象层：让业务不依赖任何具体模型 SDK
 
-业务层（Agent、Workflow）不应直接依赖某个模型 SDK。抽象层的目的：
+**知识点**：业务代码（Agent、Workflow）只跟"聊天接口"打交道，不 import 任何 SDK。这样换模型供应商、加 mock、统一统计成本都不动业务代码。
 
-- 模型供应商可替换（DeepSeek / 通义 / 智谱 / Ollama / OpenAI）。
-- 无 API Key 时能用 mock 兜底，本地开发和中 CI 测试不阻塞。
-- 统一拿到 `LLMResult`（content + usage + latency），便于 cost 统计和可观测。
+**为什么**：模型供应商会变、SDK 会变、免费/便宜模型会轮换。把"模型是 DeepSeek 还是 GPT"这件事隔离在接入层，是后续做模型路由、成本优化、A/B 对比的前提。
 
-## 2. 核心类型（不绑定 SDK）
+**可复用规则**：
+- 定义极小的内部类型（消息、结果、用量），不要用 SDK 自己的类型污染业务层。
+- 接入层只暴露一个统一入口（如 `chat(messages) -> result`）。
+- 一切模型差异（字段名、错误、token 统计）在接入层消化，业务层看到的是统一结果。
 
-`backend/app/llms/types.py` 定义了轻量 dataclass，避免把某个 SDK 的类型泄漏到业务层：
+## 2. 统一返回结构：content + usage + latency
 
-```python
-@dataclass
-class LLMMessage:
-    role: str          # system / user / assistant
-    content: str
+**知识点**：模型调用结果要统一成"正文 + 用量 + 耗时"三件套。
 
-@dataclass
-class LLMUsage:
-    input_tokens: int = 0
-    output_tokens: int = 0
-    model: str = ""
+**为什么**：
+- `usage`（token）是成本统计、限额、可观测的数据源。
+- `latency`（耗时）是前端展示和性能排查的依据。
+- 应用层不要自己拼这些，由接入层一次性算好。
 
-@dataclass
-class LLMResult:
-    content: str
-    usage: LLMUsage = ...
-    latency_ms: int = 0
-    raw: dict | None = None
+**可复用规则**：任何被多次消费的调用，都应在边界层把"内容、成本、耗时"一起带出来，而不是各消费方各自去抠。
 
-class LLMError(RuntimeError):
-    def __init__(self, message, *, status_code=None): ...
-```
+## 3. 配置驱动：一个开关切换 mock / 真实 / 任意供应商
 
-`LLMProvider` 是一个抽象基类，只声明一个 `chat()` 方法：
+**知识点**：用配置（`LLM_PROVIDER`）路由到哪个实现，而不是改代码。
 
-```python
-class LLMProvider(ABC):
-    model: str
-    @abstractmethod
-    def chat(self, messages: list[LLMMessage], *,
-             temperature: float = 0.7, max_tokens: int | None = None) -> LLMResult: ...
-```
+**可复用规则**：
+- 配置值未知时回退到安全默认（mock），而不是抛错崩溃。
+- 新旧配置并存时用"归一化"属性收敛，避免业务层到处判断。
 
-## 3. 工厂与配置路由
+## 4. 推理模型的坑：输出可能在 `reasoning_content`，`content` 会空
 
-入口是 `get_llm_provider()`（`backend/app/llms/__init__.py`），根据 `settings.LLM_PROVIDER` 分流：
+**知识点**：OpenAI 兼容的推理型模型（如 deepseek 推理系列）会把思考过程放 `reasoning_content`；当 token 预算耗尽时 `content` 为空。**必须回退取 `reasoning_content`，两者都空才算失败**。
 
-| `LLM_PROVIDER` 值 | 行为 |
-|---|---|
-| `mock` / `local` / `fake` | 返回 `MockLLMProvider`（离线兜底） |
-| `deepseek` / `openai` / `dashscope` / `zhipu` / `ollama` / `openai_compat` | 返回 `OpenAICompatProvider` |
-| 其他未知值 | 打 warning 并回退到 mock，避免直接崩溃 |
+**为什么**：不做回退，思考型模型会频繁返回空正文，表现为"Agent 启动了但没产出"，且极难排查。
 
-配置项（`config.py`）：
+**可复用规则**：接入任何带"思考/推理"模式的模型时，都要显式处理"主字段可能为空、需回退到思考字段"这一情况。
 
-```txt
-LLM_PROVIDER=mock            # 默认 mock，无 key 本地跑通优先
-LLM_API_KEY=                 # 主 key
-LLM_BASE_URL=https://api.deepseek.com   # 兼容网关地址
-LLM_MODEL=deepseek-chat
-# 兼容旧配置：OPENAI_API_KEY / DEFAULT_MODEL 作为缺省来源
-```
+## 5. 错误处理分层：网络 / HTTP / JSON / 字段
 
-由于同时支持新旧两套变量名，用 property 归一化：
+**知识点**：一条调用链的错误要分层捕获，每层给出可定位的报错，而不是一把 catch 吞掉。
 
-```python
-@property
-def effective_llm_api_key(self) -> str:
-    return self.LLM_API_KEY or self.OPENAI_API_KEY
+**可复用规则**：
+- 网络层错误（超时、连接失败）→ 明确写"请求失败"。
+- HTTP 非 2xx → 带上状态码和响应摘要。
+- 响应非 JSON → 明确写"非 JSON 响应"。
+- 缺关键字段 → 明确写"缺少 xx 字段"。
 
-@property
-def effective_llm_model(self) -> str:
-    return self.LLM_MODEL or self.DEFAULT_MODEL
-```
+这样线上报错能直接定位到是哪一层坏了。
 
-## 4. OpenAI 兼容 `chat/completions` 调用
+## 6. "OpenAI 兼容"的本质：一份协议，多家厂商
 
-`OpenAICompatProvider` 用 `httpx.Client` 同步 POST `{base_url}/chat/completions`：
+**知识点**：OpenAI 的 `/chat/completions` 协议已是事实标准，DeepSeek、通义、智谱、Ollama 等大多兼容。**只要实现一次协议，就能接所有兼容厂商**，区别只在 base_url、key、model 名。
 
-- 未配置 key 时直接抛 `LLMError`，提示去 `.env` 填 `LLM_API_KEY` 或切 `LLM_PROVIDER=mock`。
-- 超时默认 120s。
-- 记录 `latency_ms` 用于前端展示和成本统计。
+**可复用规则**：
+- 接入新厂商时的 checklist：① 有 `/chat/completions` 接口 ② 填网关根地址 + key ③ 是否会走 `reasoning_content`（决定是否需要第 4 点回退）。
+- base_url 只填网关根地址，不要把具体路径写死。
 
-## 5. 踩过的坑（重点）
+## 7. 成本统计的占位陷阱
 
-### 5.1 推理模型输出在 `reasoning_content`，`content` 可能为空
+**知识点**：token 数可以精确拿到，但"费用"依赖模型单价，不能写死一个数当真理。
 
-deepseek 推理模型（如 `deepseek-v4-flash`）会把思考过程放在 `reasoning_content`。当 token 预算耗尽时 `content` 会为空。**必须回退**：
+**可复用规则**：先做"格式正确"的估算（有公式、可替换单价），承认它是占位，等接入正式定价再替换。**区分"可精确度量"（token）和"只能估算"（费用）**。
 
-```python
-content = message.get("content") or message.get("reasoning_content") or ""
-if not content:
-    raise LLMError("LLM 响应 content 与 reasoning_content 均为空")
-```
+## 8. 一句话总结
 
-如果不做这个回退，思考型模型会经常返回空正文，运行表现为"Agent 什么都没输出"。
-
-### 5.2 多层错误处理，逐层给出可定位的报错
-
-```python
-with httpx.Client(timeout=self.timeout) as client:
-    resp = client.post(f"{self.base_url}/chat/completions",
-                       headers=headers, json=payload)
-# 网络层
-except httpx.HTTPError as exc:
-    raise LLMError(f"LLM 请求失败: {exc}") from exc
-
-# HTTP 非 200
-if resp.status_code != 200:
-    raise LLMError(f"LLM 返回 {resp.status_code}: {detail}", status_code=resp.status_code)
-
-# 响应非 JSON
-try: data = resp.json()
-except json.JSONDecodeError as exc:
-    raise LLMError("LLM 返回非 JSON 响应") from exc
-
-# 缺关键字段
-try: message = data["choices"][0]["message"]
-except (KeyError, IndexError, TypeError) as exc:
-    raise LLMError("LLM 响应缺少 choices/message 字段") from exc
-```
-
-### 5.3 token 统计字段映射
-
-OpenAI 兼容网关返回的 usage 用 `prompt_tokens` / `completion_tokens`，要映射到内部 `LLMUsage.input_tokens / output_tokens`：
-
-```python
-usage = data.get("usage") or {}
-LLMUsage(
-    input_tokens=usage.get("prompt_tokens", 0),
-    output_tokens=usage.get("completion_tokens", 0),
-    model=self.model,
-)
-```
-
-## 6. 如何接入一个新的 OpenAI 兼容供应商
-
-1. 确认它有 `/chat/completions` 接口（OpenAI 协议）。
-2. 在 `.env` 填 `LLM_BASE_URL`（网关根地址，不带 `/v1/chat/completions`）和 `LLM_API_KEY`。
-3. 把 `LLM_PROVIDER` 设为该供应商名，或复用 `openai_compat`。
-4. 若输出走 `reasoning_content`，确认 5.1 的回退逻辑已生效。
-
-## 7. 验证
-
-运行端到端验证（真实模型）：
-
-```bash
-cd backend
-uv run pytest tests/test_agents.py tests/test_workflow.py   # 走 mock
-# 切真实模型后，创建任务并观察 run 事件与 artifact 是否生成
-```
-
-## 8. 后续可改进
-
-- 支持 `stream=True` 流式输出（当前是阻塞式单次请求）。
-- 增加 `max_tokens` 显式传参（当前主要靠 `default`）。
-- 把 usage 持久化到独立的 `llm_calls` 表（当前只在 `run_steps.metadata_` 里记录 token/model/latency）。
+接入模型的正确姿势是：**抽象边界 + 统一返回 + 配置路由 + 处理推理空字段 + 分层报错 + 按 OpenAPI 兼容协议复用 + 明确估算边界**。
