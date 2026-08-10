@@ -274,19 +274,29 @@ artifacts
 
 任务清单：
 
-- [ ] 实现 `Tool` model。
-- [ ] 实现 `ToolCall` model。
-- [ ] 实现 Tool Registry。
-- [ ] 定义 Tool 输入输出 schema。
-- [ ] 实现第一个 safe tool。
-- [ ] 实现工具调用事件。
-- [ ] 前端展示 tool call 参数和结果。
+- [x] 实现 `Tool` model。
+- [x] 实现 `ToolCall` model。
+- [x] 实现 Tool Registry。
+- [x] 定义 Tool 输入输出 schema。
+- [x] 实现第一个 safe tool。
+- [x] 实现工具调用事件。
+- [x] 前端展示 tool call 参数和结果。
 
 验收：
 
 - Agent 可以调用已注册工具。
 - Tool 调用过程可审计。
 - Tool 失败时 run 能记录错误。
+
+关键实现决策：
+
+- Tool 由代码注册(`app/tools/registry.py` 单例 + `builtin.py`),不落 DB 表;每次调用落一条 `tool_calls` 记录(`app/models/tool_call.py`,含 input/output/status/risk_level/duration,迁移 `bf4a7ce789b8`)。`Tool` 抽象基类(`app/tools/base.py`)定义 name/description/risk_level/input_schema 与 execute,`ToolResult` 携带结构化 output 与展示用 display。
+- `ToolRunner`(`app/tools/runner.py`)统一执行:创建 `ToolCall`(running)→写 `tool_call_started` 事件→执行→完成/失败回写记录并写 `tool_call_completed`/`tool_call_failed` 事件;工具产出 `display` 存入 `output["_display"]` 供前端展示。
+- 内置 safe 工具:`current_time`、`generate_report`(本地确定性初稿,无外部依赖)。
+- 新增 `ResearcherAgent`(`app/agents/researcher.py`):声明 `tool_use`(generate_report),由 workflow 经 ToolRunner 执行并注入 `previous["tool_result"]`,`WriterAgent` 读取 `tool_result.draft` 作为撰写素材。工具未声明/失败时不中断 workflow(兜底 generate_report)。
+- 查询接口:`GET /api/runs/{run_id}/tool_calls`(`app/api/runs.py`)返回 Toolkit 列表。
+- 前端运行详情页(`frontend/app/runs/[id]/page.tsx`)新增“工具调用”区块,展示 id/工具名/状态/耗时/输入参数/错误;`RunTimeline` 支持 `tool_call_started/completed/failed` 事件标签。
+- 单元测试:`tests/test_workflow.py` 新增 `test_workflow_executes_tool_call`,验证 Researcher 触发工具、ToolCall 记录完整且 output 含 `_display`;同步更新步骤计数断言(新增 Researcher 步骤)。
 
 ## 13. Step 11: 取消、重试和审批
 

@@ -10,7 +10,7 @@ import { useRunEvents } from "@/lib/useRunEvents";
 import { StatusBadge } from "@/components/StatusBadge";
 import { RunTimeline } from "@/components/RunTimeline";
 import { ArtifactViewer } from "@/components/ArtifactViewer";
-import type { Artifact, RunStatus } from "@/lib/types";
+import type { Artifact, RunStatus, ToolCall } from "@/lib/types";
 
 const TERMINAL: RunStatus[] = ["completed", "failed", "cancelled"];
 
@@ -33,6 +33,14 @@ export default function RunDetailPage() {
     queryFn: () => api.listRunArtifacts(runId),
     enabled: !!runId,
   });
+
+  const { data: toolCalls } = useQuery({
+    queryKey: ["tool_calls", runId],
+    queryFn: () => api.listRunToolCalls(runId),
+    enabled: !!runId,
+  });
+
+  const toolCallList = toolCalls?.items ?? [];
 
   const artifactList = artifacts?.items ?? [];
   const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
@@ -157,6 +165,42 @@ export default function RunDetailPage() {
             </div>
             <RunTimeline events={events} live={live} />
           </div>
+
+          {/* 工具调用列表 */}
+          {toolCallList.length > 0 && (
+            <div className="rounded-2xl border border-line bg-surface p-5">
+              <h2 className="mb-3 font-display text-base font-semibold tracking-tight">工具调用</h2>
+              <div className="space-y-3">
+                {toolCallList.map((tc) => (
+                  <div key={tc.id} className="rounded-lg border border-line bg-background p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs text-faint">{shortId(tc.id)}</span>
+                        <span className="font-medium">{tc.tool_name}</span>
+                        <StatusBadge status={tc.status} />
+                      </div>
+                      <span className="text-xs text-faint">
+                        {formatDateTime(tc.started_at)} · {tc.duration_ms ?? "—"}ms
+                      </span>
+                    </div>
+                    {tc.input && Object.keys(tc.input).length > 0 && (
+                      <div className="mt-2 text-xs">
+                        <div className="text-faint">输入参数</div>
+                        <pre className="mt-1 overflow-x-auto rounded bg-zinc-bg p-2 font-mono text-xs text-muted">
+                          {JSON.stringify(tc.input, null, 2)}
+                        </pre>
+                      </div>
+                    )}
+                    {tc.error_message && (
+                      <div className="mt-2 rounded bg-red-bg/20 p-2 text-xs text-red">
+                        {tc.error_message}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* 右：产物列表 + viewer */}

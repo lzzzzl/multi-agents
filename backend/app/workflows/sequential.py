@@ -14,10 +14,18 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.agents import AgentContext, BaseAgent, PlannerAgent, ReviewerAgent, WriterAgent
+from app.agents import (
+    AgentContext,
+    BaseAgent,
+    PlannerAgent,
+    ResearcherAgent,
+    ReviewerAgent,
+    WriterAgent,
+)
 from app.core.config import settings
 from app.models import Run, RunEvent, RunStep, Task
 from app.models.artifact import Artifact
+from app.tools.runner import ToolRunner
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +38,7 @@ class SequentialWorkflow:
 
     def __init__(self, *, max_rewrites: int | None = None) -> None:
         self._planner = PlannerAgent()
+        self._researcher = ResearcherAgent()
         self._writer = WriterAgent()
         self._reviewer = ReviewerAgent()
         # 最大重写轮次(不含首次出稿)
@@ -147,6 +156,59 @@ class SequentialWorkflow:
             previous=previous or {},
         )
 
+    def _latest_step_id(self, db: Session, run_id: str) -> str | None:
+        step = db.scalar(
+            select(RunStep)
+            .where(RunStep.run_id == run_id)
+            .order_by(RunStep.sequence.desc())
+            .limit(1)
+        )
+        return step.id if step else None
+
+    def _execute_tool(
+        self,
+        db: Session,
+        run_id: str,
+        task: Task,
+        tool_use: dict[str, Any] | None,
+        *,
+        step_id: str | None,
+    ) -> dict[str, Any]:
+        """执行工具调用,返回结果 dict。
+
+        优先使用 Agent 声明的 tool_use;若缺失或非法,回退到 generate_report
+        依据任务标题生成初稿,保证工具调用链路始终可观测。工具失败时记录错误,
+        不中断 workflow。
+        """
+        tool_name = "generate_report"
+        args: dict[str, Any] = {"title": task.title, "outline": []}
+        if isinstance(tool_use, dict) and tool_use.get("name"):
+            tool_name = str(tool_use["name"])
+            declared_args = tool_use.get("args")
+            if isinstance(declared_args, dict):
+                args = dict(declared_args)
+            args.setdefault("title", task.title)
+
+        runner = ToolRunner(db)
+        try:
+            call = runner.run(
+                run_id=run_id,
+                tool_name=tool_name,
+                args=args,
+                step_id=step_id,
+                agent_id="agent_researcher",
+            )
+            return {
+                "tool_name": tool_name,
+                "tool_call_id": call.id,
+                "output": call.output or {},
+                "draft": (call.output or {}).get("_display"),
+                "error": call.error_message,
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Tool %s failed for run %s: %s", tool_name, run_id, exc)
+            return {"tool_name": tool_name, "output": {}, "error": str(exc)}
+
     def execute(self, db: Session, run_id: str) -> dict[str, Any]:
         """执行整个 workflow,返回汇总结果。"""
         run = db.get(Run, run_id)
@@ -172,9 +234,28 @@ class SequentialWorkflow:
         total_output += plan_result.usage.output_tokens
         steps_done += 1
 
-        # 2. Writer -> Reviewer 循环
+        # 2. Researcher:声明并执行工具调用,为 Writer 准备初稿素材
+        if self._check_cancelled(db, run_id):
+            return {"cancelled": True}
+        sequence += 1
+        researcher_result = self._run_agent_step(
+            db, run_id, self._researcher, self._make_context(run, task, previous), sequence=sequence
+        )
+        previous["agent_researcher"] = researcher_result.output
+        total_input += researcher_result.usage.input_tokens
+        total_output += researcher_result.usage.output_tokens
+        steps_done += 1
+
+        # 执行 Researcher 声明的工具调用,结果注入上下文供 Writer 参考
+        step_id = self._latest_step_id(db, run_id)
+        previous["tool_result"] = self._execute_tool(
+            db, run_id, task, researcher_result.output.get("tool_use"), step_id=step_id
+        )
+
+        # 3. Writer -> Reviewer 循环
         quality = "revision"
         final_content = ""
+        rewrites = 0
         for round_no in range(self._max_rewrites + 1):
             if self._check_cancelled(db, run_id):
                 logger.info("Run %s cancelled around round %s", run_id, round_no)
@@ -229,7 +310,9 @@ class SequentialWorkflow:
                 )
                 break
 
-        # 3. 生成最终 Markdown artifact
+        rewrites = round_no  # 实际发生的重写轮次(首轮不计)
+
+        # 4. 生成最终 Markdown artifact
         artifact = Artifact(
             run_id=run_id,
             created_by_agent_id="agent_writer",
@@ -257,7 +340,7 @@ class SequentialWorkflow:
             "workflow": self.name,
             "plan": plan.get("steps") or [],
             "quality": quality,
-            "rewrites": steps_done // 2 - 1,
+            "rewrites": rewrites,
             "cost_summary": {
                 "input_tokens": total_input,
                 "output_tokens": total_output,
@@ -288,7 +371,7 @@ class SequentialWorkflow:
         return {
             "artifact_id": artifact.id,
             "steps": steps_done,
-            "rewrites": steps_done // 2 - 1,  # 重写轮次(Writer+Reviewer 配对,减首次出稿)
+            "rewrites": rewrites,  # 重写轮次(Writer+Reviewer 配对,减首次出稿)
             "quality": quality,
             "input_tokens": total_input,
             "output_tokens": total_output,

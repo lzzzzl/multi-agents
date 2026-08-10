@@ -8,6 +8,7 @@ import type {
   Task,
   TaskCreate,
   TaskDetail,
+  ToolCall,
 } from "./types";
 
 // 后端 API 基地址。默认本地开发后端在 8000 端口。
@@ -80,6 +81,8 @@ export const api = {
     const q = afterSequence ? `?after_sequence=${afterSequence}` : "";
     return request<RunEventPage>(`/api/runs/${runId}/events${q}`);
   },
+  listRunToolCalls: (runId: string) =>
+    request<Page<ToolCall>>(`/api/runs/${runId}/tool_calls`),
 
   // artifacts
   listRunArtifacts: (runId: string) =>

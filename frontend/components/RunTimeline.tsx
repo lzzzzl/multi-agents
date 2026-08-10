@@ -58,6 +58,14 @@ function EventIcon({ type }: { type: string }) {
           <path d="M9 9h6v6H9z" />
         </svg>
       );
+    case "tool_call_started":
+    case "tool_call_completed":
+    case "tool_call_failed":
+      return (
+        <svg viewBox="0 0 24 24" {...common}>
+          <path d="M14.7 6.3a4.5 4.5 0 0 0-6 6l-4 4a1.5 1.5 0 0 0 2.1 2.1l4-4a4.5 4.5 0 0 0 6-6l-2.6 2.6a1.5 1.5 0 0 1-2.1-2.1l2.6-2.6Z" strokeLinejoin="round" />
+        </svg>
+      );
     default:
       return (
         <svg viewBox="0 0 24 24" {...common}>
@@ -79,6 +87,9 @@ function typeLabel(type: string): string {
     run_failed: "运行失败",
     run_cancelled: "运行已取消",
     tool_call: "工具调用",
+    tool_call_started: "工具调用开始",
+    tool_call_completed: "工具调用完成",
+    tool_call_failed: "工具调用失败",
   };
   return map[type] ?? type;
 }

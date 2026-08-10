@@ -32,6 +32,13 @@ class WriterAgent(BaseAgent):
                 desc = s.get("description") or ""
                 lines.append(f"- {name}: {desc}")
 
+        # 若 Researcher 通过工具生成了初稿,作为撰写素材
+        tool_result = ctx.previous.get("tool_result") or {}
+        draft = tool_result.get("draft")
+        if draft:
+            lines.append("下面是通过工具生成的报告初稿,请据此润色、补全并重写为完整定稿:")
+            lines.append(draft)
+
         # 若上一稿被 Reviewer 打回,携带反馈与上一稿内容要求重写
         review = ctx.previous.get("agent_reviewer") or {}
         if review.get("quality") == "revision":

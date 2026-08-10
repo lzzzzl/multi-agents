@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from app.llms.mock import MockLLMProvider
-from app.models import Run, Task
+from app.models import Run, Task, ToolCall
 from app.workflows import SequentialWorkflow
 
 
@@ -30,8 +30,8 @@ def test_rewrite_loop_passes(_mock) -> None:
 
     summary = SequentialWorkflow(max_rewrites=2).execute(db, "run_x")
 
-    # Planner + 首次(Writer,Reviewer) + 重写(Writer,Reviewer) = 5 步
-    assert summary["steps"] == 5
+    # Planner + Researcher + 首次(Writer,Reviewer) + 重写(Writer,Reviewer) = 6 步
+    assert summary["steps"] == 6
     assert summary["rewrites"] == 1
     assert summary["quality"] == "pass"
     assert summary["artifact_id"]
@@ -45,8 +45,41 @@ def test_no_rewrite_allowed_stops_on_revision(_mock) -> None:
 
     summary = SequentialWorkflow(max_rewrites=0).execute(db, "run_y")
 
-    # 首次评审即 revision,且不允许重写 -> 仅 Planner + Writer + Reviewer = 3 步
-    assert summary["steps"] == 3
+    # 首次评审即 revision,且不允许重写 -> Planner + Researcher + Writer + Reviewer = 4 步
+    assert summary["steps"] == 4
     assert summary["rewrites"] == 0
     assert summary["quality"] == "revision"
     assert summary["artifact_id"]
+
+
+def _collect_tool_calls(db: MagicMock) -> list[ToolCall]:
+    """从 fake db 的 add 调用中提取被持久化的 ToolCall 对象。"""
+    calls: list[ToolCall] = []
+    for call in db.add.call_args_list:
+        obj = call.args[0]
+        if isinstance(obj, ToolCall):
+            calls.append(obj)
+    return calls
+
+
+@patch("app.agents.base.get_llm_provider", return_value=MockLLMProvider(latency_ms=0))
+def test_workflow_executes_tool_call(_mock) -> None:
+    """Researcher 阶段触发工具调用,应在 ToolCall 记录中可见且可审计。"""
+    run = Run(id="run_z", task_id="task_z", input_snapshot={})
+    task = Task(id="task_z", title="测试任务", description=None)
+    db = _make_fake_db(run, task)
+
+    summary = SequentialWorkflow(max_rewrites=0).execute(db, "run_z")
+
+    # Researcher 未声明工具时,workflow 仍会兜底执行 generate_report
+    tool_calls = _collect_tool_calls(db)
+    assert len(tool_calls) == 1
+    tc = tool_calls[0]
+    assert tc.tool_name == "generate_report"
+    assert tc.risk_level == "safe"
+    assert tc.status == "completed"
+    assert tc.agent_id == "agent_researcher"
+    assert tc.input and tc.input["title"] == "测试任务"
+    # 工具生成的可展示初稿被写入 output._display,供 Writer 使用
+    assert tc.output and tc.output.get("_display")
+    assert summary["steps"] == 4

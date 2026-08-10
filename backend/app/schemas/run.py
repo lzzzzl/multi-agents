@@ -69,3 +69,21 @@ class RunEventOut(BaseModel):
 class RunEventPage(BaseModel):
     items: list[RunEventOut]
     next_sequence: int | None = None
+
+
+class ToolCallOut(BaseModel):
+    id: str
+    run_id: str
+    step_id: str | None = None
+    agent_id: str | None = None
+    tool_name: str
+    risk_level: str
+    status: str
+    input: dict[str, Any] | None = None
+    output: dict[str, Any] | None = None
+    error_message: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    duration_ms: int | None = None
+
+    model_config = {"from_attributes": True}

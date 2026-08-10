@@ -159,3 +159,29 @@ export interface Artifact {
   metadata: Record<string, unknown> | null;
   created_at: string;
 }
+
+// ---- ToolCall ----
+export type ToolCallStatus =
+  | "pending"
+  | "waiting_for_approval"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "rejected";
+
+export interface ToolCall {
+  id: string;
+  run_id: string;
+  step_id: string | null;
+  agent_id: string | null;
+  tool_name: string;
+  risk_level: string;
+  status: ToolCallStatus;
+  input: Record<string, unknown> | null;
+  output: Record<string, unknown> | null;
+  error_message: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_ms: number | null;
+}

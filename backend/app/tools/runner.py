@@ -125,7 +125,11 @@ class ToolRunner:
             raise ToolError(str(exc)) from exc
 
         call.status = "completed"
-        call.output = result.output
+        output = dict(result.output or {})
+        if result.display:
+            # 工具产生的可展示文本(如报表初稿)作为执行结果一部分持久化
+            output["_display"] = result.display
+        call.output = output
         call.completed_at = self._now()
         call.duration_ms = int((time.monotonic() - started) * 1000)
         self.db.commit()

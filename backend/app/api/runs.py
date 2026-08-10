@@ -4,11 +4,21 @@ import json
 
 from fastapi import APIRouter, Depends, Query
 from sse_starlette.sse import EventSourceResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal, get_db
-from app.schemas.common import ApiResponse
-from app.schemas.run import RunCreate, RunDetailOut, RunEventOut, RunEventPage, RunOut, RunStepOut
+from app.models import Run, ToolCall
+from app.schemas.common import ApiResponse, Page
+from app.schemas.run import (
+    RunCreate,
+    RunDetailOut,
+    RunEventOut,
+    RunEventPage,
+    RunOut,
+    RunStepOut,
+    ToolCallOut,
+)
 from app.services import EventService, RunService
 
 router = APIRouter(prefix="/runs", tags=["runs"])
@@ -39,6 +49,19 @@ def list_events(
     items = [RunEventOut.model_validate(e) for e in events]
     next_seq = items[-1].sequence if items else after_sequence
     return ApiResponse.ok(RunEventPage(items=items, next_sequence=next_seq))
+
+
+@router.get("/{run_id}/tool_calls", response_model=ApiResponse[Page[ToolCallOut]])
+def list_run_tool_calls(run_id: str, db: Session = Depends(get_db)) -> ApiResponse:
+    # 确认 run 存在(不存在会抛 RunNotFound)
+    RunService(db).get(run_id)
+    stmt = (
+        select(ToolCall)
+        .where(ToolCall.run_id == run_id)
+        .order_by(ToolCall.started_at.asc())
+    )
+    items = [ToolCallOut.model_validate(tc) for tc in db.scalars(stmt)]
+    return ApiResponse.ok(Page(items=items, next_cursor=None))
 
 
 @router.get("/{run_id}/events/stream")
