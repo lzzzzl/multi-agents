@@ -6,6 +6,7 @@ Writer 出稿后经 Reviewer 评审:
   循环直至通过或达到 WORKFLOW_MAX_REWRITES 上限。
 """
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -228,7 +229,7 @@ class SequentialWorkflow:
                 )
                 break
 
-        # 3. 生成最终 artifact
+        # 3. 生成最终 Markdown artifact
         artifact = Artifact(
             run_id=run_id,
             created_by_agent_id="agent_writer",
@@ -247,6 +248,41 @@ class SequentialWorkflow:
             run_id,
             type="artifact_created",
             payload={"artifact_id": artifact.id, "name": artifact.name},
+        )
+
+        # 4. 生成执行摘要 JSON artifact(计划 + 成本 + 质量)
+        plan = previous.get("agent_planner") or {}
+        json_content = {
+            "task": {"id": task.id, "title": task.title},
+            "workflow": self.name,
+            "plan": plan.get("steps") or [],
+            "quality": quality,
+            "rewrites": steps_done // 2 - 1,
+            "cost_summary": {
+                "input_tokens": total_input,
+                "output_tokens": total_output,
+                "estimated_cost": _estimate_cost(total_input, total_output),
+            },
+        }
+        json_text = json.dumps(json_content, ensure_ascii=False, indent=2)
+        summary_artifact = Artifact(
+            run_id=run_id,
+            created_by_agent_id="agent_reviewer",
+            type="json",
+            name="execution-summary.json",
+            mime_type="application/json",
+            content=json_text,
+            size_bytes=len(json_text.encode("utf-8")),
+        )
+        db.add(summary_artifact)
+        db.commit()
+        db.refresh(summary_artifact)
+
+        self._append_event(
+            db,
+            run_id,
+            type="artifact_created",
+            payload={"artifact_id": summary_artifact.id, "name": summary_artifact.name},
         )
 
         return {

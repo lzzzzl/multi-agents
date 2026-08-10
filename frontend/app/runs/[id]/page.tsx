@@ -3,13 +3,14 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import ReactMarkdown from "react-markdown";
+import { useState } from "react";
 import { api } from "@/lib/api";
 import { formatDateTime, shortId } from "@/lib/format";
 import { useRunEvents } from "@/lib/useRunEvents";
 import { StatusBadge } from "@/components/StatusBadge";
 import { RunTimeline } from "@/components/RunTimeline";
-import type { RunStatus } from "@/lib/types";
+import { ArtifactViewer } from "@/components/ArtifactViewer";
+import type { Artifact, RunStatus } from "@/lib/types";
 
 const TERMINAL: RunStatus[] = ["completed", "failed", "cancelled"];
 
@@ -32,6 +33,11 @@ export default function RunDetailPage() {
     queryFn: () => api.listRunArtifacts(runId),
     enabled: !!runId,
   });
+
+  const artifactList = artifacts?.items ?? [];
+  const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
+  const activeArtifact =
+    artifactList.find((a) => a.id === activeArtifactId) ?? artifactList[0] ?? null;
 
   const { events } = useRunEvents(runId, run?.status);
   const live = !!run && !TERMINAL.includes(run.status);
@@ -64,7 +70,6 @@ export default function RunDetailPage() {
   }
 
   const cost = run.cost_summary;
-  const artifact = artifacts?.items?.[0];
 
   return (
     <div className="mx-auto max-w-6xl px-5 py-10">
@@ -154,29 +159,56 @@ export default function RunDetailPage() {
           </div>
         </div>
 
-        {/* 右：artifact */}
+        {/* 右：产物列表 + viewer */}
         <div className="rounded-2xl border border-line bg-surface lg:sticky lg:top-20 lg:self-start">
           <div className="flex items-center justify-between border-b border-line px-5 py-3.5">
             <h2 className="font-display text-base font-semibold tracking-tight">产物</h2>
-            {artifact && (
+            {activeArtifact && (
               <span className="font-mono text-[11px] text-faint">
-                {artifact.type} · {artifact.size_bytes ?? 0} B
+                {activeArtifact.type} · {activeArtifact.size_bytes ?? 0} B
               </span>
             )}
           </div>
+
+          {/* 产物切换列表 */}
+          {artifactList.length > 1 && (
+            <div className="flex flex-wrap gap-1.5 border-b border-line px-5 py-3">
+              {artifactList.map((a) => (
+                <button
+                  key={a.id}
+                  onClick={() => setActiveArtifactId(a.id)}
+                  className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                    activeArtifact?.id === a.id
+                      ? "bg-accent text-white"
+                      : "border border-line bg-background text-muted hover:text-ink"
+                  }`}
+                >
+                  {a.type === "json" ? "摘要" : "报告"}
+                </button>
+              ))}
+            </div>
+          )}
+
           <div className="p-5">
-            {!artifact ? (
+            {!activeArtifact ? (
               <div className="py-10 text-center text-sm text-faint">
                 {live ? "运行完成后将在此生成产物…" : "无产物"}
               </div>
-            ) : artifact.content ? (
-              <article className="md-body">
-                <ReactMarkdown>{artifact.content}</ReactMarkdown>
-              </article>
             ) : (
-              <div className="text-sm text-muted">
-                产物存储于 <span className="font-mono text-xs">{artifact.storage_url ?? "外部存储"}</span>
-              </div>
+              <>
+                <div className="mb-3 flex items-center justify-between">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{activeArtifact.name}</div>
+                  </div>
+                  <Link
+                    href={`/artifacts/${activeArtifact.id}`}
+                    className="ml-3 inline-flex shrink-0 items-center gap-1 text-xs font-medium text-accent transition-colors hover:text-accent-strong"
+                  >
+                    新窗口打开
+                  </Link>
+                </div>
+                <ArtifactViewer artifact={activeArtifact} />
+              </>
             )}
           </div>
         </div>

@@ -247,17 +247,26 @@ artifacts
 
 任务清单：
 
-- [ ] 定义 artifact 类型。
-- [ ] 支持 Markdown artifact。
-- [ ] 支持 JSON artifact。
-- [ ] 后端实现 artifact 查询接口。
-- [ ] 前端实现 artifact viewer。
-- [ ] 运行完成后自动创建 artifact。
+- [x] 定义 artifact 类型。
+- [x] 支持 Markdown artifact。
+- [x] 支持 JSON artifact。
+- [x] 后端实现 artifact 查询接口。
+- [x] 前端实现 artifact viewer。
+- [x] 运行完成后自动创建 artifact。
 
 验收：
 
 - Run 完成后能看到最终 artifact。
 - Artifact 可以被独立打开和查看。
+
+关键实现决策：
+
+- 后端在 `SequentialWorkflow.execute` 收尾阶段生成两种 artifact:Markdown 报告(`{task.title}.md`)与执行摘要 JSON(`execution-summary.json`,含计划/质量/重写轮次/成本);均写入 `artifacts` 表并触发 `artifact_created` 事件。content 内联存储,便于独立查看与下载。
+- 查询接口:`GET /api/runs/{run_id}/artifacts` 列表、`GET /api/artifacts/{artifact_id}` 单条详情(`backend/app/api/artifacts.py`,schema `backend/app/schemas/artifact.py`)。
+- 前端新增可复用 `ArtifactViewer`(`frontend/components/ArtifactViewer.tsx`),按 `type` 渲染:markdown 用 react-markdown 富文本,json 用等宽语法块,其余纯文本。
+- 运行详情页 `frontend/app/runs/[id]/page.tsx` 增加产物区块:多 artifact 切换(报告/摘要按钮)、`新窗口打开`链接。
+- 新增独立查看页 `frontend/app/artifacts/[id]/page.tsx`:展示元信息(MIME/大小/时间/产出 Agent)、ArtifactViewer 渲染、下载按钮(基于内联 content 生成 Blob)。
+- 真实 DeepSeek 调用时,Reviewer 的 `final_content` 常含未转义换行导致 JSON 解析失败;增强 `backend/app/agents/_json.py` 的 `load_json`,在解析失败时把字符串值内的裸换行/回车转义为 `\n` 后再解析。
 
 ## 12. Step 10: Tool 系统
 

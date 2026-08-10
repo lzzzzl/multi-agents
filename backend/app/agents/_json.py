@@ -15,10 +15,37 @@ def load_json(content: str, *, what: str = "Agent 输出") -> dict:
         data = json.loads(text)
     except json.JSONDecodeError:
         start, end = text.find("{"), text.rfind("}")
-        if start != -1 and end > start:
-            data = json.loads(text[start : end + 1])
-        else:
+        if start == -1 or end <= start:
             raise LLMError(f"{what}不是合法 JSON")
+        text = text[start : end + 1]
+        # 大模型常把字符串值内的换行/回车写成裸字符,导致 JSON 非法。
+        # 转为合法转义序列后再尝试解析。
+        data = json.loads(_escape_string_newlines(text))
     if not isinstance(data, dict):
         raise LLMError(f"{what}不是 JSON 对象")
     return data
+
+
+def _escape_string_newlines(text: str) -> str:
+    """把 JSON 字符串值内未转义的换行/回车替换为 \\n,使其可被 json 解析。"""
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if escaped:
+            out.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            out.append(ch)
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            out.append(ch)
+            continue
+        if in_string and ch in "\r\n":
+            out.append("\\n")
+            continue
+        out.append(ch)
+    return "".join(out)
