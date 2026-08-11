@@ -7,7 +7,7 @@
 
 from datetime import datetime, timezone
 
-from app.tools.base import SAFE, Tool, ToolError, ToolResult
+from app.tools.base import SAFE, SENSITIVE, Tool, ToolError, ToolResult
 from app.tools.registry import ToolRegistry
 
 
@@ -53,6 +53,32 @@ class GenerateReportTool(Tool):
         )
 
 
+class SendNotificationTool(Tool):
+    """高风险工具示例:发送通知。仅用于演示人工审批,不真正发送任何消息。"""
+
+    name = "send_notification"
+    description = "向管理员发送一条执行通知(高风险,需人工审批;此处为模拟,不真正发送)。"
+    risk_level = SENSITIVE
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "channel": {"type": "string", "description": "通知渠道,如 email / webhook"},
+            "message": {"type": "string", "description": "通知内容"},
+        },
+        "required": ["message"],
+        "additionalProperties": False,
+    }
+
+    def execute(self, args: dict) -> ToolResult:
+        message = str(args.get("message") or "")
+        channel = str(args.get("channel") or "email")
+        return ToolResult(
+            output={"channel": channel, "sent": True, "message": message},
+            display=f"[模拟通知] 已通过 {channel} 发送: {message}",
+        )
+
+
 def register_builtins(registry: ToolRegistry) -> None:
     registry.register(CurrentTimeTool())
     registry.register(GenerateReportTool())
+    registry.register(SendNotificationTool())

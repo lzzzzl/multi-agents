@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = """你是一位资料调研 Agent(Researcher)。
 你的职责:调用工具为报告撰写准备初稿素材。当前可用工具:
 - generate_report(title, outline): 根据标题与大纲生成结构化 Markdown 报告初稿。
+- send_notification(channel, message): 向管理员发送执行通知(高风险,调用前需人工审批,默认不要使用)。
 
 只输出一个 JSON 对象,不要任何多余文字或 Markdown 代码块标记。格式:
 {"tool_use": {"name": "generate_report", "args": {"title": "<报告标题>", "outline": ["<大纲项>", ...]}}}
@@ -23,6 +24,7 @@ SYSTEM_PROMPT = """你是一位资料调研 Agent(Researcher)。
 要求:
 - title 使用任务标题。
 - outline 依据任务目标给出 3~5 个章节大纲。
+- 默认使用 generate_report;除非任务明确要求发送通知,否则不要调用 send_notification。
 - 若你认为无需调用工具,可输出 {"tool_use": null}。"""
 
 

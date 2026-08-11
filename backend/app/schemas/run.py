@@ -12,6 +12,12 @@ class RunCreate(BaseModel):
     input_override: dict[str, Any] | None = None
 
 
+class RunApprove(BaseModel):
+    """审批决策:approve 批准 / reject 拒绝。"""
+
+    decision: str = Field("approve", pattern="^(approve|reject)$")
+
+
 class RunOut(BaseModel):
     id: str
     task_id: str

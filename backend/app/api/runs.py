@@ -11,6 +11,7 @@ from app.db.session import SessionLocal, get_db
 from app.models import Run, ToolCall
 from app.schemas.common import ApiResponse, Page
 from app.schemas.run import (
+    RunApprove,
     RunCreate,
     RunDetailOut,
     RunEventOut,
@@ -58,7 +59,7 @@ def list_run_tool_calls(run_id: str, db: Session = Depends(get_db)) -> ApiRespon
     stmt = (
         select(ToolCall)
         .where(ToolCall.run_id == run_id)
-        .order_by(ToolCall.started_at.asc())
+        .order_by(ToolCall.created_at.asc())
     )
     items = [ToolCallOut.model_validate(tc) for tc in db.scalars(stmt)]
     return ApiResponse.ok(Page(items=items, next_cursor=None))
@@ -93,6 +94,19 @@ async def stream_events(
 
 @router.post("/{run_id}/cancel", response_model=ApiResponse[RunOut])
 def cancel_run(run_id: str, db: Session = Depends(get_db)) -> ApiResponse:
-    body = {}  # 预留 reason 字段,后续接入请求体
-    run = RunService(db).cancel(run_id, reason=body.get("reason"))
+    run = RunService(db).cancel(run_id)
+    return ApiResponse.ok(RunOut.model_validate(run))
+
+
+@router.post("/{run_id}/retry", response_model=ApiResponse[RunOut])
+def retry_run(run_id: str, db: Session = Depends(get_db)) -> ApiResponse:
+    """以相同输入快照重试已失败/已取消的 run,返回新建的 run。"""
+    run = RunService(db).retry(run_id)
+    return ApiResponse.ok(RunOut.model_validate(run))
+
+
+@router.post("/{run_id}/approve", response_model=ApiResponse[RunOut])
+def approve_run(run_id: str, payload: RunApprove, db: Session = Depends(get_db)) -> ApiResponse:
+    """审批等待中的高风险工具调用。body.decision: approve / reject。"""
+    run = RunService(db).approve(run_id, decision=payload.decision)
     return ApiResponse.ok(RunOut.model_validate(run))

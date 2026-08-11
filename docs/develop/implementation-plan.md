@@ -304,19 +304,28 @@ artifacts
 
 任务清单：
 
-- [ ] 实现 `POST /api/runs/{run_id}/cancel`。
-- [ ] 实现 `POST /api/runs/{run_id}/retry`。
-- [ ] 实现 `POST /api/runs/{run_id}/approve`。
-- [ ] Worker 支持检查取消信号。
-- [ ] 失败 step 支持重试。
-- [ ] 高风险工具调用支持人工审批。
-- [ ] 前端展示审批面板。
+- [x] 实现 `POST /api/runs/{run_id}/cancel`。
+- [x] 实现 `POST /api/runs/{run_id}/retry`。
+- [x] 实现 `POST /api/runs/{run_id}/approve`。
+- [x] Worker 支持检查取消信号。
+- [x] 失败 step 支持重试。
+- [x] 高风险工具调用支持人工审批。
+- [x] 前端展示审批面板。
 
 验收：
 
 - 用户可以取消运行。
 - 失败运行可以重试。
 - 需要审批的工具调用会暂停等待。
+
+关键实现决策：
+
+- 取消:已有 `POST /api/runs/{id}/cancel`(`RunService.cancel`),workflow 各步骤边界通过 `_check_cancelled` 检查取消信号,优先后续步骤不再执行。
+- 重试:`POST /api/runs/{id}/retry`(`RunService.retry`),仅允许 failed/cancelled 状态;以源 run 的输入快照与 workflow 创建新 run(记录 `source_run_id`)并入队。
+- 审批:`POST /api/runs/{id}/approve`,body `{decision: "approve"|"reject"}`(`RunService.approve` / schema `RunApprove`)。仅允许 `waiting_for_approval` 状态,把对应 ToolCall 与 run 转目标状态并写 `tool_call_approved/rejected` 事件。
+- 高风险工具审批:`ToolRunner` 对 `risk_level != safe` 的工具先进入审批——创建 `waiting_for_approval` ToolCall、置 run 为 `waiting_for_approval`、写 `tool_call_waiting_for_approval` 事件,然后阻塞轮询(默认 300s 超时)审批结果;获批后转为 running 执行,被拒抛 `TOOL_REJECTED`,取消抛 `RUN_CANCELLED`。内置敏感工具 `send_notification`(模拟,不真正发送)用于演示审批。
+- 前端:运行详情页 `frontend/app/runs/[id]/page.tsx` 增加审批面板(waiting_for_approval 时显示批准/拒绝)与重试按钮(failed/cancelled 时);`RunTimeline` 支持 `tool_call_waiting_for_approval/approved/rejected/cancelled` 事件标签。
+- 测试:`tests/test_approval.py` 新增敏感工具审批(批准执行/拒绝报错)与重试(新建 run 携带 source、拒绝运行中 run)共 4 用例;端到端脚本验证批准-执行、拒绝-记录、重试-新建三条链路。
 
 ## 14. Step 12: 测试与质量
 

@@ -77,6 +77,13 @@ export const api = {
   getRun: (id: string) => request<RunDetail>(`/api/runs/${id}`),
   cancelRun: (id: string) =>
     request<Run>(`/api/runs/${id}/cancel`, { method: "POST", body: "{}" }),
+  retryRun: (id: string) =>
+    request<Run>(`/api/runs/${id}/retry`, { method: "POST", body: "{}" }),
+  approveRun: (id: string, decision: "approve" | "reject") =>
+    request<Run>(`/api/runs/${id}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ decision }),
+    }),
   listEvents: (runId: string, afterSequence?: number) => {
     const q = afterSequence ? `?after_sequence=${afterSequence}` : "";
     return request<RunEventPage>(`/api/runs/${runId}/events${q}`);

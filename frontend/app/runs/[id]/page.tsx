@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "@/lib/api";
@@ -17,6 +17,7 @@ const TERMINAL: RunStatus[] = ["completed", "failed", "cancelled"];
 export default function RunDetailPage() {
   const params = useParams<{ id: string }>();
   const runId = params.id;
+  const router = useRouter();
 
   const { data: run, isLoading, isError, error } = useQuery({
     queryKey: ["run", runId],
@@ -53,6 +54,17 @@ export default function RunDetailPage() {
   const cancelMutation = useMutation({
     mutationFn: () => api.cancelRun(runId),
     onError: (e) => alert(e instanceof Error ? e.message : "取消失败"),
+  });
+
+  const approveMutation = useMutation({
+    mutationFn: (decision: "approve" | "reject") => api.approveRun(runId, decision),
+    onError: (e) => alert(e instanceof Error ? e.message : "审批失败"),
+  });
+
+  const retryMutation = useMutation({
+    mutationFn: () => api.retryRun(runId),
+    onSuccess: (newRun) => router.push(`/runs/${newRun.id}`),
+    onError: (e) => alert(e instanceof Error ? e.message : "重试失败"),
   });
 
   if (isLoading) {
@@ -101,6 +113,26 @@ export default function RunDetailPage() {
             <StatusBadge status={run.status} />
           </div>
 
+          {run.status === "waiting_for_approval" && (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => approveMutation.mutate("approve")}
+                disabled={approveMutation.isPending}
+                className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90"
+                style={{ backgroundColor: "var(--green)" }}
+              >
+                {approveMutation.isPending ? "处理中…" : "批准"}
+              </button>
+              <button
+                onClick={() => approveMutation.mutate("reject")}
+                disabled={approveMutation.isPending}
+                className="inline-flex items-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-sm font-semibold text-red transition-colors hover:bg-red-bg"
+              >
+                {approveMutation.isPending ? "处理中…" : "拒绝"}
+              </button>
+            </div>
+          )}
+
           {live && (
             <button
               onClick={() => cancelMutation.mutate()}
@@ -111,6 +143,20 @@ export default function RunDetailPage() {
                 <rect x="6" y="6" width="12" height="12" rx="2" />
               </svg>
               {cancelMutation.isPending ? "取消中…" : "取消运行"}
+            </button>
+          )}
+
+          {(run.status === "failed" || run.status === "cancelled") && (
+            <button
+              onClick={() => retryMutation.mutate()}
+              disabled={retryMutation.isPending}
+              className="inline-flex items-center gap-2 rounded-full bg-accent px-4 py-2 text-sm font-semibold text-white transition-colors hover:opacity-90"
+            >
+              <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" stroke="currentColor" strokeWidth="2">
+                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                <path d="M3 3v5h5" />
+              </svg>
+              {retryMutation.isPending ? "重试中…" : "重试"}
             </button>
           )}
         </div>

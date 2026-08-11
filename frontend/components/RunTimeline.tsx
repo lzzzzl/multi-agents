@@ -61,6 +61,10 @@ function EventIcon({ type }: { type: string }) {
     case "tool_call_started":
     case "tool_call_completed":
     case "tool_call_failed":
+    case "tool_call_waiting_for_approval":
+    case "tool_call_approved":
+    case "tool_call_rejected":
+    case "tool_call_cancelled":
       return (
         <svg viewBox="0 0 24 24" {...common}>
           <path d="M14.7 6.3a4.5 4.5 0 0 0-6 6l-4 4a1.5 1.5 0 0 0 2.1 2.1l4-4a4.5 4.5 0 0 0 6-6l-2.6 2.6a1.5 1.5 0 0 1-2.1-2.1l2.6-2.6Z" strokeLinejoin="round" />
@@ -90,6 +94,10 @@ function typeLabel(type: string): string {
     tool_call_started: "工具调用开始",
     tool_call_completed: "工具调用完成",
     tool_call_failed: "工具调用失败",
+    tool_call_waiting_for_approval: "等待审批",
+    tool_call_approved: "工具调用已批准",
+    tool_call_rejected: "工具调用已拒绝",
+    tool_call_cancelled: "工具调用已取消",
   };
   return map[type] ?? type;
 }
