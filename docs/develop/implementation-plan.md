@@ -10,14 +10,14 @@
 
 任务清单：
 
-- [ ] 创建 `backend/` 目录。
-- [ ] 创建 `frontend/` 目录。
-- [ ] 创建 `shared/` 目录。
-- [ ] 创建 `docs/` 目录。
-- [ ] 创建根目录 `.env.example`。
-- [ ] 创建根目录 `README.md`。
-- [ ] 创建根目录 `docker-compose.yml`。
-- [ ] 明确 Python、Node.js、PostgreSQL、Redis 版本。
+- [x] 创建 `backend/` 目录。
+- [x] 创建 `frontend/` 目录。
+- [x] 创建 `shared/` 目录。
+- [x] 创建 `docs/` 目录。
+- [x] 创建根目录 `.env.example`。
+- [x] 创建根目录 `README.md`。
+- [x] 创建根目录 `docker-compose.yml`。
+- [x] 明确 Python、Node.js、PostgreSQL、Redis 版本。
 
 建议结构：
 
@@ -33,20 +33,25 @@ docs/
 - 根目录结构清晰。
 - 文档、后端、前端、共享 schema 各自独立。
 
+关键实现决策：
+
+- `shared/` 作为保留目录(`shared/README.md` 说明用途),当前各包 schema 分别维护于 `backend/app/schemas/` 与 `frontend/lib/types.ts`,待出现跨包共享定义时再收敛。
+- 版本基线:PostgreSQL 16、Redis 7(docker-compose 固定镜像)、Python >=3.12(pyproject)、Node.js 取 create-next-app 默认 LTS。
+
 ## 3. Step 1: 后端工程初始化
 
 目标：启动一个可运行的 FastAPI 服务。
 
 任务清单：
 
-- [ ] 初始化 Python 项目。
-- [ ] 安装 FastAPI、Uvicorn、Pydantic Settings。
-- [ ] 创建 `backend/app/main.py`。
-- [ ] 创建 `/health` 健康检查接口。
-- [ ] 创建配置模块 `core/config.py`。
-- [ ] 创建日志模块 `core/logging.py`。
-- [ ] 创建测试目录 `backend/tests/`。
-- [ ] 添加后端启动命令。
+- [x] 初始化 Python 项目。
+- [x] 安装 FastAPI、Uvicorn、Pydantic Settings。
+- [x] 创建 `backend/app/main.py`。
+- [x] 创建 `/health` 健康检查接口。
+- [x] 创建配置模块 `core/config.py`。
+- [x] 创建日志模块 `core/logging.py`。
+- [x] 创建测试目录 `backend/tests/`。
+- [x] 添加后端启动命令。
 
 建议依赖：
 
@@ -74,14 +79,14 @@ httpx
 
 任务清单：
 
-- [ ] 初始化 Next.js App Router 项目。
-- [ ] 启用 TypeScript。
-- [ ] 配置 Tailwind CSS。
-- [ ] 安装 shadcn/ui。
-- [ ] 安装 TanStack Query。
-- [ ] 创建基础布局。
-- [ ] 创建 `/dashboard` 页面。
-- [ ] 创建 API client。
+- [x] 初始化 Next.js App Router 项目。
+- [x] 启用 TypeScript。
+- [x] 配置 Tailwind CSS。
+- [x] 安装 shadcn/ui。
+- [x] 安装 TanStack Query。
+- [x] 创建基础布局。
+- [x] 创建 `/dashboard` 页面。
+- [x] 创建 API client。
 
 建议依赖：
 
@@ -101,19 +106,24 @@ shadcn/ui
 - `/dashboard` 页面可以访问。
 - API client 可以调用后端 `/health`。
 
+关键实现决策：
+
+- 未安装 shadcn/ui,改用自定义 Tailwind 组件(components/`Header`/`StatusBadge`/`RunTimeline`/`ArtifactViewer`),满足组件化 UI 目标。
+- 未单独建 `/dashboard`,首页 `app/page.tsx` 直接 `redirect("/tasks")`,任务工作台即落地页。
+
 ## 5. Step 3: 本地基础设施
 
 目标：用 Docker Compose 启动 PostgreSQL 和 Redis。
 
 任务清单：
 
-- [ ] 配置 PostgreSQL 服务。
-- [ ] 配置 Redis 服务。
-- [ ] 配置数据库连接环境变量。
-- [ ] 配置 Redis 连接环境变量。
-- [ ] 补充 `.env.example`。
-- [ ] 验证后端可以连接 PostgreSQL。
-- [ ] 验证后端可以连接 Redis。
+- [x] 配置 PostgreSQL 服务。
+- [x] 配置 Redis 服务。
+- [x] 配置数据库连接环境变量。
+- [x] 配置 Redis 连接环境变量。
+- [x] 补充 `.env.example`。
+- [x] 验证后端可以连接 PostgreSQL。
+- [x] 验证后端可以连接 Redis。
 
 建议环境变量：
 
@@ -134,15 +144,15 @@ APP_ENV=local
 
 任务清单：
 
-- [ ] 配置 SQLAlchemy。
-- [ ] 配置 Alembic。
-- [ ] 实现 `Task` model。
-- [ ] 实现 `Run` model。
-- [ ] 实现 `RunStep` model。
-- [ ] 实现 `RunEvent` model。
-- [ ] 实现 `Artifact` model。
-- [ ] 创建第一版 migration。
-- [ ] 编写基础 repository 或 service。
+- [x] 配置 SQLAlchemy。
+- [x] 配置 Alembic。
+- [x] 实现 `Task` model。
+- [x] 实现 `Run` model。
+- [x] 实现 `RunStep` model。
+- [x] 实现 `RunEvent` model。
+- [x] 实现 `Artifact` model。
+- [x] 创建第一版 migration。
+- [x] 编写基础 repository 或 service。
 
 最小模型：
 
@@ -165,13 +175,13 @@ artifacts
 
 任务清单：
 
-- [ ] `POST /api/tasks` 创建任务。
-- [ ] `GET /api/tasks` 查询任务列表。
-- [ ] `GET /api/tasks/{task_id}` 查询任务详情。
-- [ ] `POST /api/runs` 创建运行。
-- [ ] `GET /api/runs/{run_id}` 查询运行详情。
-- [ ] `GET /api/runs/{run_id}/events` 查询事件列表。
-- [ ] 补充 API 测试。
+- [x] `POST /api/tasks` 创建任务。
+- [x] `GET /api/tasks` 查询任务列表。
+- [x] `GET /api/tasks/{task_id}` 查询任务详情。
+- [x] `POST /api/runs` 创建运行。
+- [x] `GET /api/runs/{run_id}` 查询运行详情。
+- [x] `GET /api/runs/{run_id}/events` 查询事件列表。
+- [x] 补充 API 测试。
 
 验收：
 
@@ -185,15 +195,15 @@ artifacts
 
 任务清单：
 
-- [ ] 选择 RQ、Celery 或 Dramatiq。
-- [ ] 创建 worker 配置。
-- [ ] 创建 `run_worker.py`。
-- [ ] API 创建 run 后投递后台 job。
-- [ ] Worker 加载 run。
-- [ ] Worker 写入 `run_started` 事件。
-- [ ] Worker 模拟写入若干 step 事件。
-- [ ] Worker 写入 `run_completed` 事件。
-- [ ] 支持失败时写入 `run_failed`。
+- [x] 选择 RQ、Celery 或 Dramatiq。
+- [x] 创建 worker 配置。
+- [x] 创建 `run_worker.py`。
+- [x] API 创建 run 后投递后台 job。
+- [x] Worker 加载 run。
+- [x] Worker 写入 `run_started` 事件。
+- [x] Worker 模拟写入若干 step 事件。
+- [x] Worker 写入 `run_completed` 事件。
+- [x] 支持失败时写入 `run_failed`。
 
 验收：
 
@@ -207,12 +217,12 @@ artifacts
 
 任务清单：
 
-- [ ] 实现 `GET /api/runs/{run_id}/events/stream`。
-- [ ] 支持 `Last-Event-ID` 或游标。
-- [ ] Worker 写事件后能推送给订阅者。
-- [ ] 前端实现 `useRunEvents`。
-- [ ] 运行详情页展示 timeline。
-- [ ] 处理断线重连。
+- [x] 实现 `GET /api/runs/{run_id}/events/stream`。
+- [x] 支持 `Last-Event-ID` 或游标。
+- [x] Worker 写事件后能推送给订阅者。
+- [x] 前端实现 `useRunEvents`。
+- [x] 运行详情页展示 timeline。
+- [x] 处理断线重连。
 
 验收：
 
@@ -225,15 +235,15 @@ artifacts
 
 任务清单：
 
-- [ ] 实现 LLM Provider 抽象。
-- [ ] 实现模型调用配置。
-- [ ] 实现 `BaseAgent`。
-- [ ] 实现 `PlannerAgent`。
-- [ ] 实现 `WriterAgent`。
-- [ ] 实现 `ReviewerAgent`。
-- [ ] 实现 sequential workflow。
-- [ ] 每个 Agent 执行时写入事件。
-- [ ] 记录 LLM 调用摘要。
+- [x] 实现 LLM Provider 抽象。
+- [x] 实现模型调用配置。
+- [x] 实现 `BaseAgent`。
+- [x] 实现 `PlannerAgent`。
+- [x] 实现 `WriterAgent`。
+- [x] 实现 `ReviewerAgent`。
+- [x] 实现 sequential workflow。
+- [x] 每个 Agent 执行时写入事件。
+- [x] 记录 LLM 调用摘要。
 
 验收：
 
