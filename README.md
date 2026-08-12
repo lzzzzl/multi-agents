@@ -41,6 +41,7 @@ docs/        # 设计文档与实现计划
 ```bash
 ./scripts/dev.sh infra     # 启动 PostgreSQL + Redis(docker compose)
 ./scripts/dev.sh migrate   # 执行 Alembic 迁移
+./scripts/dev.sh seed      # 写入演示种子数据(幂等,推荐)
 ./scripts/dev.sh backend   # 启动 FastAPI(localhost:8000)
 ./scripts/dev.sh worker    # 启动 RQ worker(执行 workflow)
 ./scripts/dev.sh frontend  # 启动 Next.js(localhost:3000)
@@ -81,6 +82,20 @@ npm run dev
 - `deepseek` / `openai` / `dashscope` / `zhipu` / `ollama`:需配置 `LLM_API_KEY` 与 `LLM_BASE_URL`。
 
 `backend/.env` 已被 `.gitignore` 忽略,不会提交密钥。
+
+## 演示种子数据
+
+`./scripts/dev.sh seed`(或 `cd backend && python -m app.scripts.seed`)写入 5 条演示任务,覆盖各类运行状态:
+
+| 任务 | 状态 | 用途 |
+| --- | --- | --- |
+| AI 智能体协作框架调研报告 | 已完成 | 查看完整步骤 / 事件 / 工具调用 / 两种 artifact |
+| 客户关怀邮件批量发送 | 等待审批 | 演示敏感工具审批面板(批准/拒绝/取消) |
+| 竞品价格分析 | 失败 | 演示「重试」 |
+| 行业趋势周报 | 已取消 | 演示「取消后重试」 |
+| 新技术选型评估:向量数据库 | 草稿 | 无 run,供发起首次运行 |
+
+脚本幂等(已存在则跳过),支持 `--force` 重建、`--clear` 清理;固定 `seed_*` ID 不污染真实数据。
 
 ## 测试
 

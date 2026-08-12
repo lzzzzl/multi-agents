@@ -55,6 +55,12 @@ cmd_frontend() {
   (cd "$FRONTEND" && npm run dev)
 }
 
+cmd_seed() {
+  require_py
+  info "写入演示种子数据(幂等,已存在则跳过)"
+  (cd "$BACKEND" && "$VENV_PY" -m app.scripts.seed)
+}
+
 cmd_down() {
   info "停止基础设施容器"
   (cd "$ROOT" && docker compose down)
@@ -96,6 +102,7 @@ usage() {
   printf '  up        一键启动: infra -> migrate -> backend + worker + frontend\n'
   printf '  infra     仅启动 PostgreSQL + Redis\n'
   printf '  migrate   执行 Alembic 迁移\n'
+  printf '  seed      写入演示种子数据(幂等)\n'
   printf '  backend   启动 FastAPI (localhost:8000)\n'
   printf '  worker    启动 RQ worker (队列 runs)\n'
   printf '  frontend  启动 Next.js (localhost:3000)\n'
@@ -109,6 +116,7 @@ case "$CMD" in
   up)      cmd_up ;;
   infra)   cmd_infra ;;
   migrate) cmd_migrate ;;
+  seed)    cmd_seed ;;
   backend) cmd_backend ;;
   worker)  cmd_worker ;;
   frontend) cmd_frontend ;;
