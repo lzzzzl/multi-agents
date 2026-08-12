@@ -333,18 +333,31 @@ artifacts
 
 任务清单：
 
-- [ ] 后端 API 测试。
-- [ ] 数据模型测试。
-- [ ] Worker 测试。
-- [ ] Workflow 测试。
-- [ ] Tool mock 测试。
-- [ ] LLM mock 测试。
-- [ ] 前端关键页面 smoke test。
+- [x] 后端 API 测试。
+- [x] 数据模型测试。
+- [x] Worker 测试。
+- [x] Workflow 测试。
+- [x] Tool mock 测试。
+- [x] LLM mock 测试。
+- [x] 前端关键页面 smoke test。
 
 验收：
 
-- 核心路径有自动化测试。
-- 不依赖真实 LLM 也能跑通 workflow 测试。
+- [x] 核心路径有自动化测试。
+- [x] 不依赖真实 LLM 也能跑通 workflow 测试。
+
+关键实现决策：
+
+- 消除事件写入重复:新增 `app/services/eventing.py` 的共享 `append_event` 助手(RunService / ToolRunner / SequentialWorkflow / run_worker 统一复用),sequence 递增逻辑集中于一处,后续如需并发保护(SELECT ... FOR UPDATE 或唯一约束)只需在此处统一修改。
+- `tests/test_api.py` 通过 `app.dependency_overrides[get_db]` 注入 fake session 测试完整请求→错误处理器→响应链路:重试运行中的 run 返回 409 `CONFLICT`(验证 Step 11 Bug #1 修复)、审批非等待状态/无待审批调用返回 409、非法 decision 返回 422。
+- `tests/test_models.py` 验证模型 schema 定义(status/risk_level/type 等的 column default)与关系集合;说明:id 等 `default` 参数由 SQLAlchemy 在 flush 时应用,实例化时为 `None`,故用 `Table.c.xxx.default.arg` 断言声明值。
+- `tests/test_worker.py` 通过 patch `SessionLocal` 与 `SequentialWorkflow` 覆盖 `execute_run` 的 completed / cancelled / failed / run 缺失 四条路径。
+- `tests/test_tools.py` 覆盖 Registry(注册/重复/未知)、三个内置工具、ToolRunner 执行 safe 工具与未知工具报错。
+- 前端引入 vitest + @testing-library/react,`frontend/vitest.config.ts`(jsdom + `@` 别名 + setup 文件),`npm test` 运行;首个 smoke test 渲染纯展示组件 `StatusBadge`。
+
+已知限制(Step 11 #7,暂不修复):
+
+- `ToolRunner._wait_for_approval` 采用 `time.sleep(1)` + `db.expire_all()` 阻塞轮询,最多 300s,期间占用一个 RQ worker 线程与 DB session。单 worker 部署下审批未决会阻塞整条队列。当前演示可接受;后续可改用 RQ 的 `enqueue_at` 延续执行或 PG `LISTEN/NOTIFY` 解除阻塞。
 
 ## 15. 开发顺序建议
 

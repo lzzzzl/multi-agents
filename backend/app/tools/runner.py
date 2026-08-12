@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models import Run, RunEvent, ToolCall
+from app.services.eventing import append_event
 from app.tools.base import SAFE, Tool, ToolError
 from app.tools.registry import get_registry
 
@@ -43,25 +44,15 @@ class ToolRunner:
         agent_id: str | None = None,
         tool_call_id: str | None = None,
     ) -> RunEvent:
-        from sqlalchemy import func, select
-
-        current_max = self.db.scalar(
-            select(func.max(RunEvent.sequence)).where(RunEvent.run_id == run_id)
-        )
-        next_seq = (current_max or 0) + 1
-        event = RunEvent(
-            run_id=run_id,
+        return append_event(
+            self.db,
+            run_id,
+            type=type,
+            payload=payload,
             step_id=step_id,
             agent_id=agent_id,
             tool_call_id=tool_call_id,
-            type=type,
-            sequence=next_seq,
-            payload=payload,
         )
-        self.db.add(event)
-        self.db.commit()
-        self.db.refresh(event)
-        return event
 
     def run(
         self,

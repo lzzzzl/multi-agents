@@ -11,7 +11,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agents import (
@@ -25,6 +25,7 @@ from app.agents import (
 from app.core.config import settings
 from app.models import Run, RunEvent, RunStep, Task
 from app.models.artifact import Artifact
+from app.services.eventing import append_event
 from app.tools.runner import ToolRunner
 
 logger = logging.getLogger(__name__)
@@ -57,22 +58,14 @@ class SequentialWorkflow:
         step_id: str | None = None,
         agent_id: str | None = None,
     ) -> RunEvent:
-        current_max = db.scalar(
-            select(func.max(RunEvent.sequence)).where(RunEvent.run_id == run_id)
-        )
-        next_seq = (current_max or 0) + 1
-        event = RunEvent(
-            run_id=run_id,
+        return append_event(
+            db,
+            run_id,
+            type=type,
+            payload=payload,
             step_id=step_id,
             agent_id=agent_id,
-            type=type,
-            sequence=next_seq,
-            payload=payload,
         )
-        db.add(event)
-        db.commit()
-        db.refresh(event)
-        return event
 
     def _check_cancelled(self, db: Session, run_id: str) -> bool:
         run = db.get(Run, run_id)

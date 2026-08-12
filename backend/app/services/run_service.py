@@ -8,12 +8,13 @@ API 层只负责创建 run 并入队,不在 HTTP 请求内执行 workflow。
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.errors import ConflictError, RunNotFound, TaskNotFound, ValidationError
 from app.models import Run, RunEvent, RunStep, Task, ToolCall
 from app.schemas.run import RunCreate
+from app.services.eventing import append_event
 
 
 class RunService:
@@ -97,24 +98,15 @@ class RunService:
         tool_call_id: str | None = None,
     ) -> RunEvent:
         """向 run 追加一个事件,sequence 在该 run 内单调递增。"""
-        current_max = self.db.scalar(
-            select(func.max(RunEvent.sequence)).where(RunEvent.run_id == run_id)
-        )
-        next_seq = (current_max or 0) + 1
-
-        event = RunEvent(
-            run_id=run_id,
+        return append_event(
+            self.db,
+            run_id,
+            type=type,
+            payload=payload,
             step_id=step_id,
             agent_id=agent_id,
             tool_call_id=tool_call_id,
-            type=type,
-            sequence=next_seq,
-            payload=payload,
         )
-        self.db.add(event)
-        self.db.commit()
-        self.db.refresh(event)
-        return event
 
     def cancel(self, run_id: str, reason: str | None = None) -> Run:
         run = self.get(run_id)

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
 from app.models import Run, RunEvent
+from app.services.eventing import append_event
 from app.workflows import SequentialWorkflow
 
 logger = logging.getLogger(__name__)
@@ -30,20 +31,7 @@ def _append_event(
     type: str,
     payload: dict | None = None,
 ) -> RunEvent:
-    from sqlalchemy import func, select
-
-    current_max = db.scalar(select(func.max(RunEvent.sequence)).where(RunEvent.run_id == run_id))
-    next_seq = (current_max or 0) + 1
-    event = RunEvent(
-        run_id=run_id,
-        type=type,
-        sequence=next_seq,
-        payload=payload,
-    )
-    db.add(event)
-    db.commit()
-    db.refresh(event)
-    return event
+    return append_event(db, run_id, type=type, payload=payload)
 
 
 def execute_run(run_id: str) -> None:
