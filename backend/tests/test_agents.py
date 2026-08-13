@@ -69,3 +69,15 @@ def test_planner_parse_tolerates_json_fence() -> None:
     content = '```json\n{"steps": [{"name": "A", "description": "B"}]}\n```'
     result = agent.parse(content)
     assert result["steps"][0]["name"] == "A"
+
+
+def test_load_json_second_parse_failure_raises_llm_error() -> None:
+    from app.agents._json import load_json
+
+    try:
+        load_json('{"a": }')
+    except Exception as exc:  # noqa: BLE001
+        assert exc.__class__.__name__ == "LLMError"
+        assert exc.code == "LLM_JSON_PARSE"
+    else:  # pragma: no cover
+        raise AssertionError("应当抛出 LLMError")

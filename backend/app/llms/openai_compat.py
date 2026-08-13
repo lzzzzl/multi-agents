@@ -70,7 +70,11 @@ class OpenAICompatProvider(LLMProvider):
         if resp.status_code != 200:
             detail = resp.text[:500]
             logger.error("LLM returned %s: %s", resp.status_code, detail)
-            raise LLMError(f"LLM 返回 {resp.status_code}: {detail}", status_code=resp.status_code)
+            raise LLMError(
+                f"LLM 返回 {resp.status_code}: {detail}",
+                status_code=resp.status_code,
+                code="LLM_HTTP_ERROR",
+            )
 
         try:
             data = resp.json()

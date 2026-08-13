@@ -19,6 +19,13 @@ def test_llm_json_parse_classified() -> None:
     )
 
 
+def test_llm_http_error_classified() -> None:
+    assert (
+        classify_error(LLMError("boom", code="LLM_HTTP_ERROR"))
+        == ErrorCode.LLM_HTTP_ERROR.value
+    )
+
+
 def test_llm_error_without_code_is_unknown() -> None:
     assert classify_error(LLMError("boom")) == ErrorCode.UNKNOWN.value
 

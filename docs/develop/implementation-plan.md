@@ -37,7 +37,7 @@ flowchart LR
 
 - 目标:把「所有错误都进 error_message」改成结构化错误码,为后续可观测性与熔断打底。
 - 主要改动:
-    - 在 `app/core/errors.py` 定义错误分类:`LLM_TIMEOUT / LLM_JSON_PARSE / TOOL_FAILED / TOOL_APPROVAL_TIMEOUT / RUN_CANCELLED / BUDGET_EXCEEDED / UNKNOWN`。
+    - 在 `app/core/errors.py` 定义错误分类:`LLM_TIMEOUT / LLM_JSON_PARSE / LLM_HTTP_ERROR / TOOL_FAILED / TOOL_APPROVAL_TIMEOUT / RUN_CANCELLED / BUDGET_EXCEEDED / UNKNOWN`。
     - `run_worker.execute_run` 与 `workflows/sequential.py` 捕获异常时写入分类码,而不是只写 `str(exc)`。
     - `Run.error_message` 保持不变,新增 `error_code` 字段(或先写入 `metadata_`)。
 - 验收:失败 run 能被分类统计;新增单测覆盖每个分类分支。

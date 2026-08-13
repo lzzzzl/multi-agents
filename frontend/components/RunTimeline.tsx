@@ -45,6 +45,7 @@ function EventIcon({ type }: { type: string }) {
         </svg>
       );
     case "run_failed":
+    case "step_failed":
       return (
         <svg viewBox="0 0 24 24" {...common}>
           <circle cx="12" cy="12" r="9" />
@@ -89,7 +90,9 @@ function typeLabel(type: string): string {
     run_started: "运行开始",
     run_completed: "运行完成",
     run_failed: "运行失败",
+    step_failed: "步骤失败",
     run_cancelled: "运行已取消",
+    llm_call: "LLM 调用",
     tool_call: "工具调用",
     tool_call_started: "工具调用开始",
     tool_call_completed: "工具调用完成",
