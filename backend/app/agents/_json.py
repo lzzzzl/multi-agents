@@ -16,13 +16,13 @@ def load_json(content: str, *, what: str = "Agent 输出") -> dict:
     except json.JSONDecodeError:
         start, end = text.find("{"), text.rfind("}")
         if start == -1 or end <= start:
-            raise LLMError(f"{what}不是合法 JSON")
+            raise LLMError(f"{what}不是合法 JSON", code="LLM_JSON_PARSE")
         text = text[start : end + 1]
         # 大模型常把字符串值内的换行/回车写成裸字符,导致 JSON 非法。
         # 转为合法转义序列后再尝试解析。
         data = json.loads(_escape_string_newlines(text))
     if not isinstance(data, dict):
-        raise LLMError(f"{what}不是 JSON 对象")
+        raise LLMError(f"{what}不是 JSON 对象", code="LLM_JSON_PARSE")
     return data
 
 

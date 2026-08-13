@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
+from app.core.errors import classify_error
 from app.db.session import SessionLocal
 from app.models import Run, RunEvent
 from app.services.eventing import append_event
@@ -86,12 +87,13 @@ def execute_run(run_id: str) -> None:
             run.status = "failed"
             run.failed_at = _now()
             run.error_message = str(exc)
+            run.error_code = classify_error(exc)
             db.commit()
             _append_event(
                 db,
                 run_id,
                 type="run_failed",
-                payload={"error": str(exc)},
+                payload={"error": str(exc), "error_code": run.error_code},
             )
 
     finally:

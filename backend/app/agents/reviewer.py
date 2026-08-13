@@ -42,7 +42,7 @@ class ReviewerAgent(BaseAgent):
         data = load_json(content, what="Reviewer 输出")
         quality = str(data.get("quality") or "pass").strip().lower()
         if quality not in {"pass", "revision"}:
-            raise LLMError("Reviewer 输出 quality 字段非法")
+            raise LLMError("Reviewer 输出 quality 字段非法", code="LLM_JSON_PARSE")
         return {
             "quality": quality,
             "score": data.get("score", 0),

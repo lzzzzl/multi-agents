@@ -33,6 +33,8 @@ class Run(Base, TimestampMixin):
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 失败归因分类(LLM_TIMEOUT / LLM_JSON_PARSE / TOOL_FAILED / ...),用于可观测性与熔断
+    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
 
     # 运行开始时快照任务输入,保证历史回放不受任务后续修改影响
     input_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)

@@ -57,11 +57,11 @@ class ResearcherAgent(BaseAgent):
         if tool_use is None:
             return {"tool_use": None}
         if not isinstance(tool_use, dict):
-            raise LLMError("Researcher 输出 tool_use 字段非法")
+            raise LLMError("Researcher 输出 tool_use 字段非法", code="LLM_JSON_PARSE")
         name = str(tool_use.get("name") or "")
         args = tool_use.get("args") or {}
         if not name:
-            raise LLMError("Researcher 输出缺少 tool_use.name")
+            raise LLMError("Researcher 输出缺少 tool_use.name", code="LLM_JSON_PARSE")
         if not isinstance(args, dict):
-            raise LLMError("Researcher 输出 tool_use.args 不是对象")
+            raise LLMError("Researcher 输出 tool_use.args 不是对象", code="LLM_JSON_PARSE")
         return {"tool_use": {"name": name, "args": args}}

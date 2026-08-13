@@ -23,6 +23,7 @@ from app.agents import (
     WriterAgent,
 )
 from app.core.config import settings
+from app.core.errors import classify_error
 from app.models import Run, RunEvent, RunStep, Task
 from app.models.artifact import Artifact
 from app.services.eventing import append_event
@@ -104,7 +105,33 @@ class SequentialWorkflow:
             payload={"name": step.name, "sequence": step.sequence},
         )
 
-        result = agent.run(ctx)
+        try:
+            result = agent.run(ctx)
+        except Exception as exc:  # noqa: BLE001
+            error_code = classify_error(exc)
+            step.status = "failed"
+            step.failed_at = self._now()
+            step.error_message = str(exc)
+            step.metadata_ = {"error_code": error_code}
+            db.commit()
+
+            self._append_event(
+                db,
+                run_id,
+                type="llm_call",
+                step_id=step.id,
+                agent_id=agent.agent_id,
+                payload={"status": "failed", "error_code": error_code, "error": str(exc)},
+            )
+            self._append_event(
+                db,
+                run_id,
+                type="step_failed",
+                step_id=step.id,
+                agent_id=agent.agent_id,
+                payload={"name": step.name, "error": str(exc), "error_code": error_code},
+            )
+            raise
 
         step.status = "completed"
         step.completed_at = self._now()
@@ -117,6 +144,20 @@ class SequentialWorkflow:
         }
         db.commit()
 
+        self._append_event(
+            db,
+            run_id,
+            type="llm_call",
+            step_id=step.id,
+            agent_id=agent.agent_id,
+            payload={
+                "model": result.usage.model,
+                "input_tokens": result.usage.input_tokens,
+                "output_tokens": result.usage.output_tokens,
+                "latency_ms": result.latency_ms,
+                "status": "success",
+            },
+        )
         self._append_event(
             db,
             run_id,

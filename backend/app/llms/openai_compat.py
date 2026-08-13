@@ -63,7 +63,7 @@ class OpenAICompatProvider(LLMProvider):
                     json=payload,
                 )
         except httpx.HTTPError as exc:
-            raise LLMError(f"LLM 请求失败: {exc}") from exc
+            raise LLMError(f"LLM 请求失败: {exc}", code="LLM_TIMEOUT") from exc
 
         latency_ms = int((time.monotonic() - started) * 1000)
 
@@ -75,12 +75,14 @@ class OpenAICompatProvider(LLMProvider):
         try:
             data = resp.json()
         except json.JSONDecodeError as exc:
-            raise LLMError("LLM 返回非 JSON 响应") from exc
+            raise LLMError("LLM 返回非 JSON 响应", code="LLM_JSON_PARSE") from exc
 
         try:
             message = data["choices"][0]["message"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise LLMError("LLM 响应缺少 choices/message 字段") from exc
+            raise LLMError(
+                "LLM 响应缺少 choices/message 字段", code="LLM_JSON_PARSE"
+            ) from exc
 
         # 推理模型(如 deepseek-v4-flash)先输出 reasoning_content,
         # 当 token 不足时 content 可能为空,此时回退到 reasoning_content。

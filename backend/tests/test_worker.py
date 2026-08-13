@@ -81,6 +81,7 @@ def test_execute_run_failed(mock_wf, mock_sl) -> None:
     assert run.status == "failed"
     assert run.failed_at is not None
     assert run.error_message == "boom"
+    assert run.error_code == "UNKNOWN"
     assert "run_failed" in _event_types(db)
 
 

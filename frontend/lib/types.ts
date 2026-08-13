@@ -84,6 +84,7 @@ export interface Run {
   failed_at: string | null;
   cancelled_at: string | null;
   error_message: string | null;
+  error_code: string | null;
   cost_summary: { input_tokens?: number; output_tokens?: number; estimated_cost?: number } | null;
   source_run_id: string | null;
   created_at: string;

@@ -38,7 +38,7 @@ class PlannerAgent(BaseAgent):
         data = load_json(content, what="Planner 输出")
         steps = data.get("steps") or []
         if not isinstance(steps, list) or not steps:
-            raise LLMError("Planner 未能产出有效的步骤列表")
+            raise LLMError("Planner 未能产出有效的步骤列表", code="LLM_JSON_PARSE")
         # 归一化每个步骤字段
         normalized = []
         for i, s in enumerate(steps, start=1):
