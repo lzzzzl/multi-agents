@@ -29,6 +29,7 @@ from app.models.artifact import Artifact
 from app.services.eventing import append_event
 from app.tools.runner import ToolRunner
 from app.workflows.base import Workflow
+from app.workflows.checkpoint import WorkflowCheckpoint, WorkflowSuspended
 from app.workflows.dag import DAG, DAGNode
 
 logger = logging.getLogger(__name__)
@@ -245,14 +246,8 @@ class SequentialWorkflow(Workflow):
             logger.warning("Tool %s failed for run %s: %s", tool_name, run_id, exc)
             return {"tool_name": tool_name, "output": {}, "error": str(exc)}
 
-    def execute(self, db: Session, run_id: str) -> dict[str, Any]:
-        """执行整个 workflow,返回汇总结果。"""
-        run = db.get(Run, run_id)
-        task = db.get(Task, run.task_id) if run else None
-        if not run or not task:
-            raise ValueError(f"Run {run_id} 或对应 Task 不存在")
-
-        context: dict[str, Any] = {
+    def _new_context(self) -> dict[str, Any]:
+        return {
             "previous": {},
             "stats": {
                 "sequence": 0,
@@ -266,8 +261,48 @@ class SequentialWorkflow(Workflow):
             "final_content": "",
         }
 
+    def _summary(self, context: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "artifact_id": context["finalize"]["artifact_id"],
+            "steps": context["stats"]["steps"],
+            "rewrites": context["rewrites"],
+            "quality": context["quality"],
+            "input_tokens": context["stats"]["input_tokens"],
+            "output_tokens": context["stats"]["output_tokens"],
+            "estimated_cost": _estimate_cost(
+                context["stats"]["input_tokens"], context["stats"]["output_tokens"]
+            ),
+        }
+
+    def _save_checkpoint(
+        self, db: Session, run_id: str, checkpoint: WorkflowCheckpoint
+    ) -> None:
+        run = db.get(Run, run_id)
+        metadata = dict(run.metadata_ or {})
+        metadata["checkpoint"] = checkpoint.to_dict()
+        run.metadata_ = metadata
+        db.commit()
+
+    def _load_checkpoint(self, run: Run) -> WorkflowCheckpoint:
+        metadata = run.metadata_ or {}
+        raw = metadata.get("checkpoint")
+        if not raw:
+            raise ValueError(f"Run {run.id} 没有可恢复的 checkpoint")
+        return WorkflowCheckpoint.from_dict(raw)
+
+    def _build_dag(
+        self,
+        db: Session,
+        run_id: str,
+        run: Run,
+        task: Task,
+        context: dict[str, Any],
+        skip: set[str],
+    ) -> tuple[DAG, list[str]]:
+        """构建 DAG。skip 中的节点视为已完成,不构建且依赖被过滤。"""
+        completed: list[str] = []
+
         def _guard(ctx: dict[str, Any]) -> bool:
-            """若已取消则标记并返回 True,调用方应直接 return None。"""
             if ctx["cancelled"] or self._check_cancelled(db, run_id):
                 ctx["cancelled"] = True
                 return True
@@ -291,6 +326,7 @@ class SequentialWorkflow(Workflow):
             )
             ctx["previous"]["agent_planner"] = result.output
             _accumulate(ctx, result)
+            completed.append("plan")
             return result.output
 
         def research(ctx: dict[str, Any]) -> Any:
@@ -306,6 +342,7 @@ class SequentialWorkflow(Workflow):
             )
             ctx["previous"]["agent_researcher"] = result.output
             _accumulate(ctx, result)
+            completed.append("research")
             return result.output
 
         def execute_tool(ctx: dict[str, Any]) -> Any:
@@ -320,6 +357,7 @@ class SequentialWorkflow(Workflow):
                 step_id=step_id,
             )
             ctx["previous"]["tool_result"] = tool_result
+            completed.append("execute_tool")
             return tool_result
 
         def compose(ctx: dict[str, Any]) -> Any:
@@ -372,6 +410,7 @@ class SequentialWorkflow(Workflow):
                     break
 
             ctx["rewrites"] = round_no
+            completed.append("compose")
             return {
                 "quality": ctx["quality"],
                 "final_content": ctx["final_content"],
@@ -437,33 +476,68 @@ class SequentialWorkflow(Workflow):
                 payload={"artifact_id": summary_artifact.id, "name": summary_artifact.name},
             )
 
+            completed.append("finalize")
             return {"artifact_id": artifact.id}
 
-        dag = DAG(
-            [
-                DAGNode("plan", plan),
-                DAGNode("research", research, depends_on=["plan"]),
-                DAGNode("execute_tool", execute_tool, depends_on=["research"]),
-                DAGNode("compose", compose, depends_on=["execute_tool"]),
-                DAGNode("finalize", finalize, depends_on=["compose"]),
-            ]
+        spec = [
+            ("plan", plan, []),
+            ("research", research, ["plan"]),
+            ("execute_tool", execute_tool, ["research"]),
+            ("compose", compose, ["execute_tool"]),
+            ("finalize", finalize, ["compose"]),
+        ]
+        nodes = [
+            DAGNode(name, executor, depends_on=[d for d in deps if d not in skip])
+            for name, executor, deps in spec
+            if name not in skip
+        ]
+        return DAG(nodes), completed
+
+    def execute(self, db: Session, run_id: str) -> dict[str, Any]:
+        """执行整个 workflow;节点挂起时持久化 checkpoint 并返回 suspended。"""
+        run = db.get(Run, run_id)
+        task = db.get(Task, run.task_id) if run else None
+        if not run or not task:
+            raise ValueError(f"Run {run_id} 或对应 Task 不存在")
+
+        context = self._new_context()
+        dag, completed = self._build_dag(db, run_id, run, task, context, skip=set())
+        try:
+            dag.run(context, parallel=False)
+        except WorkflowSuspended as exc:
+            checkpoint = WorkflowCheckpoint(
+                workflow_name=self.name,
+                completed_nodes=list(completed),
+                context=context,
+                suspended_node=exc.node,
+                reason=exc.reason,
+            )
+            self._save_checkpoint(db, run_id, checkpoint)
+            return {"suspended": True, "node": exc.node, "reason": exc.reason}
+
+        if context["cancelled"]:
+            return {"cancelled": True}
+
+        return self._summary(context)
+
+    def resume(self, db: Session, run_id: str) -> dict[str, Any]:
+        """从 checkpoint 恢复执行,跳过已完成节点,不重复执行。"""
+        run = db.get(Run, run_id)
+        task = db.get(Task, run.task_id) if run else None
+        if not run or not task:
+            raise ValueError(f"Run {run_id} 或对应 Task 不存在")
+
+        checkpoint = self._load_checkpoint(run)
+        context = checkpoint.context
+        dag, _ = self._build_dag(
+            db, run_id, run, task, context, skip=set(checkpoint.completed_nodes)
         )
         dag.run(context, parallel=False)
 
         if context["cancelled"]:
             return {"cancelled": True}
 
-        return {
-            "artifact_id": context["finalize"]["artifact_id"],
-            "steps": context["stats"]["steps"],
-            "rewrites": context["rewrites"],
-            "quality": context["quality"],
-            "input_tokens": context["stats"]["input_tokens"],
-            "output_tokens": context["stats"]["output_tokens"],
-            "estimated_cost": _estimate_cost(
-                context["stats"]["input_tokens"], context["stats"]["output_tokens"]
-            ),
-        }
+        return self._summary(context)
 
 
 def _estimate_cost(input_tokens: int, output_tokens: int) -> float:
