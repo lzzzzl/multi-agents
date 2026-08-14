@@ -28,11 +28,13 @@ from app.models import Run, RunEvent, RunStep, Task
 from app.models.artifact import Artifact
 from app.services.eventing import append_event
 from app.tools.runner import ToolRunner
+from app.workflows.base import Workflow
+from app.workflows.dag import DAG, DAGNode
 
 logger = logging.getLogger(__name__)
 
 
-class SequentialWorkflow:
+class SequentialWorkflow(Workflow):
     """串行编排 Agent,并在 Reviewer 不通过时自动触发重写循环。"""
 
     name = "sequential_report"
@@ -250,166 +252,217 @@ class SequentialWorkflow:
         if not run or not task:
             raise ValueError(f"Run {run_id} 或对应 Task 不存在")
 
-        previous: dict[str, dict[str, Any]] = {}
-        total_input = 0
-        total_output = 0
-        steps_done = 0
-        sequence = 0
-
-        # 1. Planner
-        if self._check_cancelled(db, run_id):
-            return {"cancelled": True}
-        sequence += 1
-        plan_result = self._run_agent_step(
-            db, run_id, self._planner, self._make_context(run, task, previous), sequence=sequence
-        )
-        previous["agent_planner"] = plan_result.output
-        total_input += plan_result.usage.input_tokens
-        total_output += plan_result.usage.output_tokens
-        steps_done += 1
-
-        # 2. Researcher:声明并执行工具调用,为 Writer 准备初稿素材
-        if self._check_cancelled(db, run_id):
-            return {"cancelled": True}
-        sequence += 1
-        researcher_result = self._run_agent_step(
-            db, run_id, self._researcher, self._make_context(run, task, previous), sequence=sequence
-        )
-        previous["agent_researcher"] = researcher_result.output
-        total_input += researcher_result.usage.input_tokens
-        total_output += researcher_result.usage.output_tokens
-        steps_done += 1
-
-        # 执行 Researcher 声明的工具调用,结果注入上下文供 Writer 参考
-        step_id = self._latest_step_id(db, run_id)
-        previous["tool_result"] = self._execute_tool(
-            db, run_id, task, researcher_result.output.get("tool_use"), step_id=step_id
-        )
-
-        # 3. Writer -> Reviewer 循环
-        quality = "revision"
-        final_content = ""
-        rewrites = 0
-        for round_no in range(self._max_rewrites + 1):
-            if self._check_cancelled(db, run_id):
-                logger.info("Run %s cancelled around round %s", run_id, round_no)
-                return {"cancelled": True}
-
-            suffix = "" if round_no == 0 else f"·修改{round_no}"
-
-            sequence += 1
-            writer_result = self._run_agent_step(
-                db,
-                run_id,
-                self._writer,
-                self._make_context(run, task, previous),
-                sequence=sequence,
-                name_suffix=suffix,
-            )
-            previous["agent_writer"] = writer_result.output
-            total_input += writer_result.usage.input_tokens
-            total_output += writer_result.usage.output_tokens
-            steps_done += 1
-
-            sequence += 1
-            reviewer_result = self._run_agent_step(
-                db,
-                run_id,
-                self._reviewer,
-                self._make_context(run, task, previous),
-                sequence=sequence,
-                name_suffix=suffix,
-            )
-            previous["agent_reviewer"] = reviewer_result.output
-            total_input += reviewer_result.usage.input_tokens
-            total_output += reviewer_result.usage.output_tokens
-            steps_done += 1
-
-            quality = reviewer_result.output.get("quality") or "revision"
-            final_content = (
-                reviewer_result.output.get("final_content")
-                or writer_result.output.get("markdown")
-                or writer_result.output.get("content")
-                or ""
-            )
-            if quality == "pass":
-                break
-
-            if round_no >= self._max_rewrites:
-                logger.warning(
-                    "Run %s reached max rewrites (%s), stopping with quality=%s",
-                    run_id,
-                    self._max_rewrites,
-                    quality,
-                )
-                break
-
-        rewrites = round_no  # 实际发生的重写轮次(首轮不计)
-
-        # 4. 生成最终 Markdown artifact
-        artifact = Artifact(
-            run_id=run_id,
-            created_by_agent_id="agent_writer",
-            type="markdown",
-            name=f"{task.title}.md",
-            mime_type="text/markdown",
-            content=final_content,
-            size_bytes=len(final_content.encode("utf-8")),
-        )
-        db.add(artifact)
-        db.commit()
-        db.refresh(artifact)
-
-        self._append_event(
-            db,
-            run_id,
-            type="artifact_created",
-            payload={"artifact_id": artifact.id, "name": artifact.name},
-        )
-
-        # 4. 生成执行摘要 JSON artifact(计划 + 成本 + 质量)
-        plan = previous.get("agent_planner") or {}
-        json_content = {
-            "task": {"id": task.id, "title": task.title},
-            "workflow": self.name,
-            "plan": plan.get("steps") or [],
-            "quality": quality,
-            "rewrites": rewrites,
-            "cost_summary": {
-                "input_tokens": total_input,
-                "output_tokens": total_output,
-                "estimated_cost": _estimate_cost(total_input, total_output),
+        context: dict[str, Any] = {
+            "previous": {},
+            "stats": {
+                "sequence": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "steps": 0,
             },
+            "cancelled": False,
+            "quality": "revision",
+            "rewrites": 0,
+            "final_content": "",
         }
-        json_text = json.dumps(json_content, ensure_ascii=False, indent=2)
-        summary_artifact = Artifact(
-            run_id=run_id,
-            created_by_agent_id="agent_reviewer",
-            type="json",
-            name="execution-summary.json",
-            mime_type="application/json",
-            content=json_text,
-            size_bytes=len(json_text.encode("utf-8")),
-        )
-        db.add(summary_artifact)
-        db.commit()
-        db.refresh(summary_artifact)
 
-        self._append_event(
-            db,
-            run_id,
-            type="artifact_created",
-            payload={"artifact_id": summary_artifact.id, "name": summary_artifact.name},
+        def _guard(ctx: dict[str, Any]) -> bool:
+            """若已取消则标记并返回 True,调用方应直接 return None。"""
+            if ctx["cancelled"] or self._check_cancelled(db, run_id):
+                ctx["cancelled"] = True
+                return True
+            return False
+
+        def _accumulate(ctx: dict[str, Any], result: Any) -> None:
+            ctx["stats"]["input_tokens"] += result.usage.input_tokens
+            ctx["stats"]["output_tokens"] += result.usage.output_tokens
+            ctx["stats"]["steps"] += 1
+
+        def plan(ctx: dict[str, Any]) -> Any:
+            if _guard(ctx):
+                return None
+            ctx["stats"]["sequence"] += 1
+            result = self._run_agent_step(
+                db,
+                run_id,
+                self._planner,
+                self._make_context(run, task, ctx["previous"]),
+                sequence=ctx["stats"]["sequence"],
+            )
+            ctx["previous"]["agent_planner"] = result.output
+            _accumulate(ctx, result)
+            return result.output
+
+        def research(ctx: dict[str, Any]) -> Any:
+            if _guard(ctx):
+                return None
+            ctx["stats"]["sequence"] += 1
+            result = self._run_agent_step(
+                db,
+                run_id,
+                self._researcher,
+                self._make_context(run, task, ctx["previous"]),
+                sequence=ctx["stats"]["sequence"],
+            )
+            ctx["previous"]["agent_researcher"] = result.output
+            _accumulate(ctx, result)
+            return result.output
+
+        def execute_tool(ctx: dict[str, Any]) -> Any:
+            if _guard(ctx):
+                return None
+            step_id = self._latest_step_id(db, run_id)
+            tool_result = self._execute_tool(
+                db,
+                run_id,
+                task,
+                (ctx["previous"].get("agent_researcher") or {}).get("tool_use"),
+                step_id=step_id,
+            )
+            ctx["previous"]["tool_result"] = tool_result
+            return tool_result
+
+        def compose(ctx: dict[str, Any]) -> Any:
+            for round_no in range(self._max_rewrites + 1):
+                if _guard(ctx):
+                    return None
+
+                suffix = "" if round_no == 0 else f"·修改{round_no}"
+
+                ctx["stats"]["sequence"] += 1
+                writer_result = self._run_agent_step(
+                    db,
+                    run_id,
+                    self._writer,
+                    self._make_context(run, task, ctx["previous"]),
+                    sequence=ctx["stats"]["sequence"],
+                    name_suffix=suffix,
+                )
+                ctx["previous"]["agent_writer"] = writer_result.output
+                _accumulate(ctx, writer_result)
+
+                ctx["stats"]["sequence"] += 1
+                reviewer_result = self._run_agent_step(
+                    db,
+                    run_id,
+                    self._reviewer,
+                    self._make_context(run, task, ctx["previous"]),
+                    sequence=ctx["stats"]["sequence"],
+                    name_suffix=suffix,
+                )
+                ctx["previous"]["agent_reviewer"] = reviewer_result.output
+                _accumulate(ctx, reviewer_result)
+
+                ctx["quality"] = reviewer_result.output.get("quality") or "revision"
+                ctx["final_content"] = (
+                    reviewer_result.output.get("final_content")
+                    or writer_result.output.get("markdown")
+                    or writer_result.output.get("content")
+                    or ""
+                )
+                if ctx["quality"] == "pass":
+                    break
+                if round_no >= self._max_rewrites:
+                    logger.warning(
+                        "Run %s reached max rewrites (%s), stopping with quality=%s",
+                        run_id,
+                        self._max_rewrites,
+                        ctx["quality"],
+                    )
+                    break
+
+            ctx["rewrites"] = round_no
+            return {
+                "quality": ctx["quality"],
+                "final_content": ctx["final_content"],
+                "rewrites": ctx["rewrites"],
+            }
+
+        def finalize(ctx: dict[str, Any]) -> Any:
+            if _guard(ctx):
+                return None
+
+            final_content = ctx["final_content"]
+            artifact = Artifact(
+                run_id=run_id,
+                created_by_agent_id="agent_writer",
+                type="markdown",
+                name=f"{task.title}.md",
+                mime_type="text/markdown",
+                content=final_content,
+                size_bytes=len(final_content.encode("utf-8")),
+            )
+            db.add(artifact)
+            db.commit()
+            db.refresh(artifact)
+            self._append_event(
+                db,
+                run_id,
+                type="artifact_created",
+                payload={"artifact_id": artifact.id, "name": artifact.name},
+            )
+
+            plan_output = ctx["previous"].get("agent_planner") or {}
+            json_content = {
+                "task": {"id": task.id, "title": task.title},
+                "workflow": self.name,
+                "plan": plan_output.get("steps") or [],
+                "quality": ctx["quality"],
+                "rewrites": ctx["rewrites"],
+                "cost_summary": {
+                    "input_tokens": ctx["stats"]["input_tokens"],
+                    "output_tokens": ctx["stats"]["output_tokens"],
+                    "estimated_cost": _estimate_cost(
+                        ctx["stats"]["input_tokens"], ctx["stats"]["output_tokens"]
+                    ),
+                },
+            }
+            json_text = json.dumps(json_content, ensure_ascii=False, indent=2)
+            summary_artifact = Artifact(
+                run_id=run_id,
+                created_by_agent_id="agent_reviewer",
+                type="json",
+                name="execution-summary.json",
+                mime_type="application/json",
+                content=json_text,
+                size_bytes=len(json_text.encode("utf-8")),
+            )
+            db.add(summary_artifact)
+            db.commit()
+            db.refresh(summary_artifact)
+            self._append_event(
+                db,
+                run_id,
+                type="artifact_created",
+                payload={"artifact_id": summary_artifact.id, "name": summary_artifact.name},
+            )
+
+            return {"artifact_id": artifact.id}
+
+        dag = DAG(
+            [
+                DAGNode("plan", plan),
+                DAGNode("research", research, depends_on=["plan"]),
+                DAGNode("execute_tool", execute_tool, depends_on=["research"]),
+                DAGNode("compose", compose, depends_on=["execute_tool"]),
+                DAGNode("finalize", finalize, depends_on=["compose"]),
+            ]
         )
+        dag.run(context, parallel=False)
+
+        if context["cancelled"]:
+            return {"cancelled": True}
 
         return {
-            "artifact_id": artifact.id,
-            "steps": steps_done,
-            "rewrites": rewrites,  # 重写轮次(Writer+Reviewer 配对,减首次出稿)
-            "quality": quality,
-            "input_tokens": total_input,
-            "output_tokens": total_output,
-            "estimated_cost": _estimate_cost(total_input, total_output),
+            "artifact_id": context["finalize"]["artifact_id"],
+            "steps": context["stats"]["steps"],
+            "rewrites": context["rewrites"],
+            "quality": context["quality"],
+            "input_tokens": context["stats"]["input_tokens"],
+            "output_tokens": context["stats"]["output_tokens"],
+            "estimated_cost": _estimate_cost(
+                context["stats"]["input_tokens"], context["stats"]["output_tokens"]
+            ),
         }
 
 

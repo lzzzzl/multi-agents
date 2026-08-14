@@ -45,6 +45,10 @@ class ArtifactNotFound(NotFoundError):
     code = "ARTIFACT_NOT_FOUND"
 
 
+class WorkflowNotFound(NotFoundError):
+    code = "WORKFLOW_NOT_FOUND"
+
+
 class ErrorCode(StrEnum):
     """Run 失败的归因分类,用于可观测性与熔断统计。"""
 

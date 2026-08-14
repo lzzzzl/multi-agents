@@ -16,7 +16,7 @@ from app.core.errors import classify_error
 from app.db.session import SessionLocal
 from app.models import Run, RunEvent
 from app.services.eventing import append_event
-from app.workflows import SequentialWorkflow
+from app.workflows import get_registry
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +52,10 @@ def execute_run(run_id: str) -> None:
         run.started_at = _now()
         db.commit()
 
-        # 2. 执行真实 workflow
-        workflow = SequentialWorkflow()
+        # 2. 按 run.workflow_name 从 registry 取 workflow 并执行
         try:
+            workflow_cls = get_registry().get(run.workflow_name)
+            workflow = workflow_cls()
             summary = workflow.execute(db, run_id)
             if summary.get("cancelled"):
                 return

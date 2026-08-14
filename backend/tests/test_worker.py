@@ -1,5 +1,5 @@
 """Worker 测试:execute_run 的完成/取消/失败三条路径。
-通过 patch SessionLocal 与 SequentialWorkflow,不依赖真实 DB 与队列。"""
+通过 patch SessionLocal 与 get_registry,不依赖真实 DB 与队列。"""
 
 from unittest.mock import MagicMock, patch
 
@@ -29,19 +29,43 @@ def _event_types(db: MagicMock) -> list[str]:
     ]
 
 
+def _make_workflow_cls(
+    summary: dict | None = None, exc: Exception | None = None
+) -> MagicMock:
+    """构造一个假的 workflow 类,实例化后 execute 返回 summary 或抛 exc。"""
+    workflow_cls = MagicMock()
+    instance = workflow_cls.return_value
+    if exc is not None:
+        instance.execute.side_effect = exc
+    else:
+        instance.execute.return_value = summary
+    return workflow_cls
+
+
+def _patch_registry(mock_get_registry: MagicMock, workflow_cls: MagicMock) -> None:
+    registry = MagicMock()
+    registry.get.return_value = workflow_cls
+    mock_get_registry.return_value = registry
+
+
 @patch("app.workers.run_worker.SessionLocal")
-@patch("app.workers.run_worker.SequentialWorkflow")
-def test_execute_run_completed(mock_wf, mock_sl) -> None:
+@patch("app.workers.run_worker.get_registry")
+def test_execute_run_completed(mock_get_registry, mock_sl) -> None:
     run = Run(id="run_a", task_id="task_a", status="queued")
     db = _make_db(run)
     mock_sl.return_value = db
-    mock_wf.return_value.execute.return_value = {
-        "artifact_id": "artifact_x",
-        "steps": 4,
-        "input_tokens": 10,
-        "output_tokens": 20,
-        "estimated_cost": 0.0001,
-    }
+    _patch_registry(
+        mock_get_registry,
+        _make_workflow_cls(
+            summary={
+                "artifact_id": "artifact_x",
+                "steps": 4,
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "estimated_cost": 0.0001,
+            }
+        ),
+    )
 
     execute_run("run_a")
 
@@ -54,12 +78,12 @@ def test_execute_run_completed(mock_wf, mock_sl) -> None:
 
 
 @patch("app.workers.run_worker.SessionLocal")
-@patch("app.workers.run_worker.SequentialWorkflow")
-def test_execute_run_cancelled(mock_wf, mock_sl) -> None:
+@patch("app.workers.run_worker.get_registry")
+def test_execute_run_cancelled(mock_get_registry, mock_sl) -> None:
     run = Run(id="run_b", task_id="task_b", status="running")
     db = _make_db(run)
     mock_sl.return_value = db
-    mock_wf.return_value.execute.return_value = {"cancelled": True}
+    _patch_registry(mock_get_registry, _make_workflow_cls(summary={"cancelled": True}))
 
     execute_run("run_b")
 
@@ -69,12 +93,12 @@ def test_execute_run_cancelled(mock_wf, mock_sl) -> None:
 
 
 @patch("app.workers.run_worker.SessionLocal")
-@patch("app.workers.run_worker.SequentialWorkflow")
-def test_execute_run_failed(mock_wf, mock_sl) -> None:
+@patch("app.workers.run_worker.get_registry")
+def test_execute_run_failed(mock_get_registry, mock_sl) -> None:
     run = Run(id="run_c", task_id="task_c", status="running")
     db = _make_db(run)
     mock_sl.return_value = db
-    mock_wf.return_value.execute.side_effect = RuntimeError("boom")
+    _patch_registry(mock_get_registry, _make_workflow_cls(exc=RuntimeError("boom")))
 
     execute_run("run_c")
 
