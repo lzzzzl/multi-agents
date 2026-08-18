@@ -27,6 +27,8 @@ class ToolCall(Base, TimestampMixin):
 
     # 工具名(Tool 由代码 registry 注册,不依赖 DB 表)
     tool_name: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # 幂等键:run_id + tool_name + args 的稳定哈希,用于避免重复副作用
+    idempotency_key: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     # safe / sensitive / dangerous
     risk_level: Mapped[str] = mapped_column(String, nullable=False, default="safe")
 

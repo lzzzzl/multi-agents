@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     RUN_MAX_COST_USD: float = 2.00
     # Writer 出稿后 Reviewer 不通过时最大重写轮次(不含首次出稿)
     WORKFLOW_MAX_REWRITES: int = 3
+    # 单个 Agent step 遇可重试错误时的最大重试次数
+    WORKFLOW_MAX_STEP_RETRIES: int = 1
+    # 单步重试的退避基数(秒);第 n 次重试 sleep backoff * n
+    STEP_RETRY_BACKOFF_SECONDS: float = 0.5
 
     @property
     def cors_origins(self) -> list[str]:

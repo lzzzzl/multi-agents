@@ -62,6 +62,15 @@ class ErrorCode(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+# 临时性错误,可在 per-step 重试时安全重试;确定性错误(如 JSON 解析)不重试。
+RETRYABLE_ERROR_CODES = frozenset(
+    {
+        ErrorCode.LLM_TIMEOUT.value,
+        ErrorCode.LLM_HTTP_ERROR.value,
+    }
+)
+
+
 def classify_error(exc: BaseException) -> str:
     """把异常归类为 ErrorCode 值,用于写入 run.error_code。
 
@@ -79,3 +88,8 @@ def classify_error(exc: BaseException) -> str:
         return ErrorCode.TOOL_FAILED.value
 
     return ErrorCode.UNKNOWN.value
+
+
+def is_retryable_error(exc: BaseException) -> bool:
+    """判断异常是否属于可安全重试的临时性错误。"""
+    return classify_error(exc) in RETRYABLE_ERROR_CODES

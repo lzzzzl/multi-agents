@@ -59,6 +59,7 @@ class SendNotificationTool(Tool):
     name = "send_notification"
     description = "向管理员发送一条执行通知(高风险,需人工审批;此处为模拟,不真正发送)。"
     risk_level = SENSITIVE
+    deduplicate = True
     input_schema = {
         "type": "object",
         "properties": {

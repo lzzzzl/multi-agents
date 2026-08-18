@@ -8,6 +8,7 @@ Writer 出稿后经 Reviewer 评审:
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -23,7 +24,7 @@ from app.agents import (
     WriterAgent,
 )
 from app.core.config import settings
-from app.core.errors import classify_error
+from app.core.errors import classify_error, is_retryable_error
 from app.models import Run, RunEvent, RunStep, Task
 from app.models.artifact import Artifact
 from app.services.eventing import append_event
@@ -41,13 +42,24 @@ class SequentialWorkflow(Workflow):
     name = "sequential_report"
     version = "1.1.0"
 
-    def __init__(self, *, max_rewrites: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        max_rewrites: int | None = None,
+        max_step_retries: int | None = None,
+    ) -> None:
         self._planner = PlannerAgent()
         self._researcher = ResearcherAgent()
         self._writer = WriterAgent()
         self._reviewer = ReviewerAgent()
         # 最大重写轮次(不含首次出稿)
         self._max_rewrites = max_rewrites if max_rewrites is not None else settings.WORKFLOW_MAX_REWRITES
+        # 单个 Agent step 遇可重试错误时的最大重试次数
+        self._max_step_retries = (
+            max_step_retries
+            if max_step_retries is not None
+            else settings.WORKFLOW_MAX_STEP_RETRIES
+        )
 
     def _now(self) -> datetime:
         return datetime.now(timezone.utc)
@@ -108,33 +120,45 @@ class SequentialWorkflow(Workflow):
             payload={"name": step.name, "sequence": step.sequence},
         )
 
-        try:
-            result = agent.run(ctx)
-        except Exception as exc:  # noqa: BLE001
-            error_code = classify_error(exc)
-            step.status = "failed"
-            step.failed_at = self._now()
-            step.error_message = str(exc)
-            step.metadata_ = {"error_code": error_code}
-            db.commit()
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                result = agent.run(ctx)
+                break
+            except Exception as exc:  # noqa: BLE001
+                if not is_retryable_error(exc) or attempts > self._max_step_retries:
+                    error_code = classify_error(exc)
+                    step.status = "failed"
+                    step.failed_at = self._now()
+                    step.error_message = str(exc)
+                    step.metadata_ = {"error_code": error_code, "attempts": attempts}
+                    db.commit()
 
-            self._append_event(
-                db,
-                run_id,
-                type="llm_call",
-                step_id=step.id,
-                agent_id=agent.agent_id,
-                payload={"status": "failed", "error_code": error_code, "error": str(exc)},
-            )
-            self._append_event(
-                db,
-                run_id,
-                type="step_failed",
-                step_id=step.id,
-                agent_id=agent.agent_id,
-                payload={"name": step.name, "error": str(exc), "error_code": error_code},
-            )
-            raise
+                    self._append_event(
+                        db,
+                        run_id,
+                        type="llm_call",
+                        step_id=step.id,
+                        agent_id=agent.agent_id,
+                        payload={"status": "failed", "error_code": error_code, "error": str(exc)},
+                    )
+                    self._append_event(
+                        db,
+                        run_id,
+                        type="step_failed",
+                        step_id=step.id,
+                        agent_id=agent.agent_id,
+                        payload={"name": step.name, "error": str(exc), "error_code": error_code},
+                    )
+                    raise
+                logger.warning(
+                    "Step %s of run %s failed on attempt %s, retrying",
+                    step.name,
+                    run_id,
+                    attempts,
+                )
+                time.sleep(settings.STEP_RETRY_BACKOFF_SECONDS * attempts)
 
         step.status = "completed"
         step.completed_at = self._now()
@@ -144,6 +168,7 @@ class SequentialWorkflow(Workflow):
             "output_tokens": result.usage.output_tokens,
             "model": result.usage.model,
             "latency_ms": result.latency_ms,
+            "attempts": attempts,
         }
         db.commit()
 

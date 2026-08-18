@@ -40,6 +40,9 @@ class Tool(ABC):
     description: str = ""
     # safe / sensitive / dangerous
     risk_level: str = SAFE
+    # 标记工具调用是否需要按幂等键去重。有外部副作用的工具(如发送通知)
+    # 应设为 True,由 ToolRunner 保证相同输入只真正执行一次。
+    deduplicate: bool = False
     # JSON Schema 描述输入参数
     input_schema: dict[str, Any] = {}
     timeout_seconds: float = 30.0

@@ -5,11 +5,14 @@ waiting_for_approval、run 置为 waiting_for_approval,然后阻塞轮询
 审批结果;获批后才真正执行,被拒则抛 ToolError 并记录错误。
 """
 
+import hashlib
+import json
 import logging
 import time
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Run, RunEvent, ToolCall
@@ -22,6 +25,19 @@ logger = logging.getLogger(__name__)
 # 审批轮询间隔与上限(秒)。超时视为审批失败,避免 worker 无限阻塞。
 APPROVAL_POLL_INTERVAL = 1.0
 APPROVAL_TIMEOUT_SECONDS = 300.0
+# 幂等去重时视为「有效」的状态:完成或进行中;失败/取消/拒绝视为可重新尝试。
+ACTIVE_TOOL_CALL_STATUSES = {"pending", "running", "waiting_for_approval", "completed"}
+
+
+def _make_idempotency_key(run_id: str, tool_name: str, args: dict[str, Any]) -> str:
+    """生成幂等键:run_id + tool_name + args 的稳定哈希(与 args 顺序无关)。"""
+    payload = json.dumps(
+        {"run_id": run_id, "tool_name": tool_name, "args": args},
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class ToolRunner:
@@ -65,11 +81,23 @@ class ToolRunner:
     ) -> ToolCall:
         """执行指定工具,返回持久化的 ToolCall。"""
         tool = self._registry.get(tool_name)
+        idempotency_key = _make_idempotency_key(run_id, tool_name, args)
+
+        # 需要去重的工具:相同 key 存在完成/进行中的调用时直接复用,避免重复副作用
+        if tool.deduplicate:
+            existing = self._find_active_by_key(run_id, idempotency_key)
+            if existing is not None:
+                return existing
 
         # 高风险工具:先挂起等待人工审批,获批后才执行
         if tool.risk_level != SAFE:
             return self._run_with_approval(
-                run_id, tool, args, step_id=step_id, agent_id=agent_id
+                run_id,
+                tool,
+                args,
+                step_id=step_id,
+                agent_id=agent_id,
+                idempotency_key=idempotency_key,
             )
 
         # 普通 safe 工具直接执行
@@ -78,6 +106,7 @@ class ToolRunner:
             step_id=step_id,
             agent_id=agent_id,
             tool_name=tool.name,
+            idempotency_key=idempotency_key,
             risk_level=tool.risk_level,
             status="running",
             input=args,
@@ -106,6 +135,7 @@ class ToolRunner:
         *,
         step_id: str | None,
         agent_id: str | None,
+        idempotency_key: str | None = None,
     ) -> ToolCall:
         """高风险工具:挂起等待审批,获批后执行。"""
         call = ToolCall(
@@ -113,6 +143,7 @@ class ToolRunner:
             step_id=step_id,
             agent_id=agent_id,
             tool_name=tool.name,
+            idempotency_key=idempotency_key,
             risk_level=tool.risk_level,
             status="waiting_for_approval",
             input=args,
@@ -197,6 +228,18 @@ class ToolRunner:
             payload={"tool": tool.name, "risk_level": tool.risk_level, "input": args},
         )
         return self._execute_tool_call(run_id, tool, call, args, step_id=step_id, agent_id=agent_id)
+
+    def _find_active_by_key(self, run_id: str, idempotency_key: str) -> ToolCall | None:
+        """按幂等键查找同 run 内完成或进行中的 ToolCall(排除失败/取消/拒绝)。"""
+        return self.db.scalar(
+            select(ToolCall).where(
+                ToolCall.run_id == run_id,
+                ToolCall.idempotency_key == idempotency_key,
+                ToolCall.status.in_(ACTIVE_TOOL_CALL_STATUSES),
+            )
+            .order_by(ToolCall.created_at.desc())
+            .limit(1)
+        )
 
     def _wait_for_approval(self, run_id: str, call_id: str) -> str:
         """阻塞等待审批结果,返回 approved / rejected / cancelled / timeout。
