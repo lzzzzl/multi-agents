@@ -113,6 +113,32 @@ class RunService:
         if run.status in {"completed", "failed", "cancelled"}:
             # 已终态,返回当前状态
             return run
+
+        # 异步审批挂起中的 run 取消时,同步取消待审批的 ToolCall(Step 2.1)
+        if run.status == "waiting_for_approval":
+            pending_calls = list(
+                self.db.scalars(
+                    select(ToolCall).where(
+                        ToolCall.run_id == run_id,
+                        ToolCall.status == "waiting_for_approval",
+                    )
+                )
+            )
+            for call in pending_calls:
+                call.status = "cancelled"
+                call.completed_at = datetime.now(timezone.utc)
+            if pending_calls:
+                self.db.commit()
+                for call in pending_calls:
+                    self.append_event(
+                        run_id,
+                        type="tool_call_cancelled",
+                        step_id=call.step_id,
+                        agent_id=call.agent_id,
+                        tool_call_id=call.id,
+                        payload={"tool": call.tool_name},
+                    )
+
         run.status = "cancelled"
         run.cancelled_at = datetime.now(timezone.utc)
         self.db.commit()
@@ -166,7 +192,8 @@ class RunService:
         """审批等待中的高风险工具调用。decision: approve / reject。
 
         把对应 ToolCall 与 run 从 waiting_for_approval 转为目标状态,
-        让正在阻塞等待的 worker 继续执行。
+        然后把 resume job 重新入队,由 worker 从 checkpoint 续跑
+        (Step 2.1:审批期间不占用 worker)。
         """
         run = self.get(run_id)
         if run.status != "waiting_for_approval":
@@ -185,7 +212,7 @@ class RunService:
             call.status = "approved"
             run.status = "running"
         elif decision == "reject":
-            # 拒绝后 workflow 会继续执行,因此 run 仍保持 running(由 worker 接管)
+            # 拒绝后 resume 会把 ToolError 交回 workflow 处理,run 仍为 running
             call.status = "rejected"
             run.status = "running"
         else:
@@ -202,4 +229,18 @@ class RunService:
             tool_call_id=call.id,
             payload={"tool": call.tool_name, "decision": decision},
         )
+
+        # 决策完成,重新入队让 worker 从 checkpoint 恢复执行。
+        # 入队失败时记录日志,run 保持 running 便于人工重投。
+        try:
+            from app.workers.queue import get_queue
+            from app.workers.run_worker import resume_run
+
+            get_queue().enqueue(resume_run, run_id, job_timeout=600)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Failed to enqueue resume for run %s after approval", run_id, exc_info=True
+            )
         return run

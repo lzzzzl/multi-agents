@@ -23,6 +23,20 @@ class ToolError(RuntimeError):
         self.code = code
 
 
+class ApprovalRequired(Exception):
+    """高风险工具等待人工审批(Step 2.1 异步审批)。
+
+    ToolRunner 创建 waiting_for_approval 的 ToolCall 后抛出本信号,
+    workflow 捕获后持久化 checkpoint 并释放 worker;
+    审批决策回来后由 resume 路径重新入队续跑。
+    """
+
+    def __init__(self, tool_call_id: str, tool_name: str) -> None:
+        super().__init__(f"工具 {tool_name}(调用 {tool_call_id})等待人工审批")
+        self.tool_call_id = tool_call_id
+        self.tool_name = tool_name
+
+
 @dataclass
 class ToolResult:
     """工具执行结果。"""

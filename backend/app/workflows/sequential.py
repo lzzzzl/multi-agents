@@ -30,6 +30,7 @@ from app.models import Run, RunEvent, RunStep, Task
 from app.models.artifact import Artifact
 from app.services.eventing import append_event
 from app.services.span_service import record_llm_span
+from app.tools.base import ApprovalRequired
 from app.tools.runner import ToolRunner
 from app.workflows.base import Workflow
 from app.workflows.checkpoint import WorkflowCheckpoint, WorkflowSuspended
@@ -298,6 +299,9 @@ class SequentialWorkflow(Workflow):
                 "draft": (call.output or {}).get("_display"),
                 "error": call.error_message,
             }
+        except ApprovalRequired:
+            # 审批挂起信号必须向上传播,由 execute/resume 持久化 checkpoint
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("Tool %s failed for run %s: %s", tool_name, run_id, exc)
             return {"tool_name": tool_name, "output": {}, "error": str(exc)}
@@ -549,51 +553,84 @@ class SequentialWorkflow(Workflow):
         ]
         return DAG(nodes), completed
 
-    def execute(self, db: Session, run_id: str) -> dict[str, Any]:
-        """执行整个 workflow;节点挂起时持久化 checkpoint 并返回 suspended。"""
+    def _suspend(
+        self,
+        db: Session,
+        run_id: str,
+        completed: list[str],
+        context: dict[str, Any],
+        *,
+        node: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """持久化 checkpoint 并返回挂起摘要(run 状态由挂起源负责设置)。"""
+        checkpoint = WorkflowCheckpoint(
+            workflow_name=self.name,
+            completed_nodes=list(completed),
+            context=context,
+            suspended_node=node,
+            reason=reason,
+        )
+        self._save_checkpoint(db, run_id, checkpoint)
+        return {"suspended": True, "node": node, "reason": reason}
+
+    def _run_dag(
+        self,
+        db: Session,
+        run_id: str,
+        context: dict[str, Any],
+        skip: set[str],
+    ) -> dict[str, Any]:
+        """执行(或恢复执行)DAG,统一处理取消与挂起,返回最终摘要。"""
         run = db.get(Run, run_id)
         task = db.get(Task, run.task_id) if run else None
         if not run or not task:
             raise ValueError(f"Run {run_id} 或对应 Task 不存在")
 
-        context = self._new_context()
-        dag, completed = self._build_dag(db, run_id, run, task, context, skip=set())
+        dag, completed = self._build_dag(db, run_id, run, task, context, skip=skip)
         try:
             dag.run(context, parallel=False)
         except WorkflowSuspended as exc:
-            checkpoint = WorkflowCheckpoint(
-                workflow_name=self.name,
-                completed_nodes=list(completed),
-                context=context,
-                suspended_node=exc.node,
-                reason=exc.reason,
+            return self._suspend(
+                db, run_id, completed, context, node=exc.node, reason=exc.reason
             )
-            self._save_checkpoint(db, run_id, checkpoint)
-            return {"suspended": True, "node": exc.node, "reason": exc.reason}
+        except ApprovalRequired as exc:
+            # 高风险工具等待审批:持久化 checkpoint,释放 worker(Step 2.1)
+            return self._suspend(
+                db,
+                run_id,
+                completed,
+                context,
+                node="execute_tool",
+                reason=f"等待工具审批: {exc.tool_name}",
+            )
 
         if context["cancelled"]:
             return {"cancelled": True}
 
         return self._summary(context)
+
+    def execute(self, db: Session, run_id: str) -> dict[str, Any]:
+        """执行整个 workflow;节点挂起时持久化 checkpoint 并返回 suspended。"""
+        context = self._new_context()
+        return self._run_dag(db, run_id, context, skip=set())
 
     def resume(self, db: Session, run_id: str) -> dict[str, Any]:
-        """从 checkpoint 恢复执行,跳过已完成节点,不重复执行。"""
+        """从 checkpoint 恢复执行,跳过已完成节点,不重复执行。
+
+        恢复路径中再次遇到审批挂起(如后续又一高风险工具)时,
+        同样持久化新 checkpoint 并返回 suspended。
+        """
         run = db.get(Run, run_id)
-        task = db.get(Task, run.task_id) if run else None
-        if not run or not task:
-            raise ValueError(f"Run {run_id} 或对应 Task 不存在")
-
+        if not run:
+            raise ValueError(f"Run {run_id} 不存在")
         checkpoint = self._load_checkpoint(run)
-        context = checkpoint.context
-        dag, _ = self._build_dag(
-            db, run_id, run, task, context, skip=set(checkpoint.completed_nodes)
+        return self._run_dag(
+            db,
+            run_id,
+            checkpoint.context,
+            skip=set(checkpoint.completed_nodes),
         )
-        dag.run(context, parallel=False)
-
-        if context["cancelled"]:
-            return {"cancelled": True}
-
-        return self._summary(context)
 
 
 def _estimate_cost(input_tokens: int, output_tokens: int) -> float:

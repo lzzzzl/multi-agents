@@ -1,8 +1,12 @@
 """ToolRunner:执行工具,创建 ToolCall 记录并写入事件。
 
-对风险等级非 safe 的工具,先进入人工审批:将 ToolCall 置为
-waiting_for_approval、run 置为 waiting_for_approval,然后阻塞轮询
-审批结果;获批后才真正执行,被拒则抛 ToolError 并记录错误。
+对风险等级非 safe 的工具,走异步人工审批(Step 2.1):
+将 ToolCall 置为 waiting_for_approval、run 置为 waiting_for_approval,
+然后抛出 ApprovalRequired 信号,由 workflow 持久化 checkpoint 并释放 worker。
+审批决策(approve/reject)后经 resume 重新进入本方法:
+- 已批准 -> 复用同一条 ToolCall 记录继续执行(不重复创建);
+- 被拒绝 -> 抛 ToolError,由上层决定后续流程;
+- 仍在等待 -> 再次抛 ApprovalRequired(幂等挂起)。
 """
 
 import hashlib
@@ -17,14 +21,11 @@ from sqlalchemy.orm import Session
 
 from app.models import Run, RunEvent, ToolCall
 from app.services.eventing import append_event
-from app.tools.base import SAFE, Tool, ToolError
+from app.tools.base import SAFE, ApprovalRequired, Tool, ToolError
 from app.tools.registry import get_registry
 
 logger = logging.getLogger(__name__)
 
-# 审批轮询间隔与上限(秒)。超时视为审批失败,避免 worker 无限阻塞。
-APPROVAL_POLL_INTERVAL = 1.0
-APPROVAL_TIMEOUT_SECONDS = 300.0
 # 幂等去重时视为「有效」的状态:完成或进行中;失败/取消/拒绝视为可重新尝试。
 ACTIVE_TOOL_CALL_STATUSES = {"pending", "running", "waiting_for_approval", "completed"}
 
@@ -83,13 +84,8 @@ class ToolRunner:
         tool = self._registry.get(tool_name)
         idempotency_key = _make_idempotency_key(run_id, tool_name, args)
 
-        # 需要去重的工具:相同 key 存在完成/进行中的调用时直接复用,避免重复副作用
-        if tool.deduplicate:
-            existing = self._find_active_by_key(run_id, idempotency_key)
-            if existing is not None:
-                return existing
-
-        # 高风险工具:先挂起等待人工审批,获批后才执行
+        # 高风险工具统一走异步审批路径(内部按既有调用状态分流:
+        # 挂起/已批准/被拒/已完成去重),不能被 safe 工具的 dedup 提前返回
         if tool.risk_level != SAFE:
             return self._run_with_approval(
                 run_id,
@@ -99,6 +95,12 @@ class ToolRunner:
                 agent_id=agent_id,
                 idempotency_key=idempotency_key,
             )
+
+        # safe 工具按需去重:相同 key 存在完成/进行中的调用时直接复用,避免重复副作用
+        if tool.deduplicate:
+            existing = self._find_active_by_key(run_id, idempotency_key)
+            if existing is not None:
+                return existing
 
         # 普通 safe 工具直接执行
         call = ToolCall(
@@ -137,7 +139,31 @@ class ToolRunner:
         agent_id: str | None,
         idempotency_key: str | None = None,
     ) -> ToolCall:
-        """高风险工具:挂起等待审批,获批后执行。"""
+        """高风险工具:挂起等待审批,获批后执行。
+
+        首次调用创建 waiting_for_approval 的 ToolCall 并抛 ApprovalRequired;
+        resume 再次进入时按既有调用的状态分流(见模块 docstring)。
+        """
+        existing = self._find_any_by_key(run_id, idempotency_key) if idempotency_key else None
+        if existing is not None:
+            if existing.status == "waiting_for_approval":
+                # 审批仍未决:幂等地再次挂起
+                raise ApprovalRequired(existing.id, tool.name)
+            if existing.status == "approved":
+                # 已批准:复用该记录转为执行(不重复创建 ToolCall)
+                return self._execute_approved(run_id, tool, existing, args, step_id=step_id, agent_id=agent_id)
+            if existing.status == "rejected":
+                raise ToolError("工具调用被人工拒绝", code="TOOL_REJECTED")
+            if existing.status == "completed":
+                return existing
+            # failed / cancelled:视为可重新尝试,走下方新建流程
+            logger.info(
+                "ToolCall %s for %s in status %r, creating a new approval request",
+                existing.id,
+                tool.name,
+                existing.status,
+            )
+
         call = ToolCall(
             run_id=run_id,
             step_id=step_id,
@@ -166,53 +192,20 @@ class ToolRunner:
             run.status = "waiting_for_approval"
             self.db.commit()
 
-        decision = self._wait_for_approval(run_id, call.id)
+        # 释放 worker:由 workflow 捕获后持久化 checkpoint
+        raise ApprovalRequired(call.id, tool.name)
 
-        if decision == "cancelled":
-            call.status = "cancelled"
-            call.completed_at = self._now()
-            self.db.commit()
-            self._append_event(
-                run_id,
-                type="tool_call_cancelled",
-                step_id=step_id,
-                agent_id=agent_id,
-                tool_call_id=call.id,
-                payload={"tool": tool.name},
-            )
-            raise ToolError("运行已取消,工具调用未执行", code="RUN_CANCELLED")
-
-        if decision == "rejected":
-            call.status = "rejected"
-            call.error_message = "工具调用被人工拒绝"
-            call.completed_at = self._now()
-            self.db.commit()
-            self._append_event(
-                run_id,
-                type="tool_call_rejected",
-                step_id=step_id,
-                agent_id=agent_id,
-                tool_call_id=call.id,
-                payload={"tool": tool.name},
-            )
-            raise ToolError("工具调用被人工拒绝", code="TOOL_REJECTED")
-
-        if decision == "timeout":
-            call.status = "failed"
-            call.error_message = "工具审批超时"
-            call.completed_at = self._now()
-            self.db.commit()
-            self._append_event(
-                run_id,
-                type="tool_call_failed",
-                step_id=step_id,
-                agent_id=agent_id,
-                tool_call_id=call.id,
-                payload={"tool": tool.name, "error": "工具审批超时"},
-            )
-            raise ToolError("工具审批超时", code="TOOL_APPROVAL_TIMEOUT")
-
-        # approved -> 恢复 run 为 running 并转为执行
+    def _execute_approved(
+        self,
+        run_id: str,
+        tool: Tool,
+        call: ToolCall,
+        args: dict[str, Any],
+        *,
+        step_id: str | None,
+        agent_id: str | None,
+    ) -> ToolCall:
+        """执行一条已批准的 ToolCall(审批回调后的 resume 路径)。"""
         run = self.db.get(Run, run_id)
         if run is not None and run.status == "waiting_for_approval":
             run.status = "running"
@@ -241,25 +234,17 @@ class ToolRunner:
             .limit(1)
         )
 
-    def _wait_for_approval(self, run_id: str, call_id: str) -> str:
-        """阻塞等待审批结果,返回 approved / rejected / cancelled / timeout。
-
-        轮询期间调用 expire_all 以读取其他会话(审批接口)写入的最新状态。
-        """
-        deadline = time.monotonic() + APPROVAL_TIMEOUT_SECONDS
-        while time.monotonic() < deadline:
-            time.sleep(APPROVAL_POLL_INTERVAL)
-            self.db.expire_all()
-            run = self.db.get(Run, run_id)
-            if run is not None and run.status == "cancelled":
-                return "cancelled"
-            call = self.db.get(ToolCall, call_id)
-            if call is not None:
-                if call.status == "approved":
-                    return "approved"
-                if call.status == "rejected":
-                    return "rejected"
-        return "timeout"
+    def _find_any_by_key(self, run_id: str, idempotency_key: str) -> ToolCall | None:
+        """按幂等键查找同 run 内最近一条任意状态的 ToolCall(含 approved/rejected)。"""
+        return self.db.scalar(
+            select(ToolCall)
+            .where(
+                ToolCall.run_id == run_id,
+                ToolCall.idempotency_key == idempotency_key,
+            )
+            .order_by(ToolCall.created_at.desc())
+            .limit(1)
+        )
 
     def _execute_tool_call(
         self,
