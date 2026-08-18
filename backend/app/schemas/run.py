@@ -94,3 +94,23 @@ class ToolCallOut(BaseModel):
     duration_ms: int | None = None
 
     model_config = {"from_attributes": True}
+
+
+class LlmSpanOut(BaseModel):
+    """单次 LLM 调用的轻量 trace 记录(Step 0.3)。"""
+
+    id: str
+    run_id: str
+    step_id: str | None = None
+    agent_id: str | None = None
+    model: str
+    input_tokens: int
+    output_tokens: int
+    latency_ms: int
+    status: str
+    error_code: str | None = None
+    error_message: str | None = None
+    attempt: int
+    created_at: datetime
+
+    model_config = {"from_attributes": True}

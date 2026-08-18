@@ -8,9 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal, get_db
-from app.models import Run, ToolCall
+from app.models import LlmSpan, Run, ToolCall
 from app.schemas.common import ApiResponse, Page
 from app.schemas.run import (
+    LlmSpanOut,
     RunApprove,
     RunCreate,
     RunDetailOut,
@@ -62,6 +63,19 @@ def list_run_tool_calls(run_id: str, db: Session = Depends(get_db)) -> ApiRespon
         .order_by(ToolCall.created_at.asc())
     )
     items = [ToolCallOut.model_validate(tc) for tc in db.scalars(stmt)]
+    return ApiResponse.ok(Page(items=items, next_cursor=None))
+
+
+@router.get("/{run_id}/llm_spans", response_model=ApiResponse[Page[LlmSpanOut]])
+def list_run_llm_spans(run_id: str, db: Session = Depends(get_db)) -> ApiResponse:
+    """查询一次 run 的全部 LLM 调用 span(含重试的失败尝试)。"""
+    RunService(db).get(run_id)
+    stmt = (
+        select(LlmSpan)
+        .where(LlmSpan.run_id == run_id)
+        .order_by(LlmSpan.created_at.asc(), LlmSpan.attempt.asc())
+    )
+    items = [LlmSpanOut.model_validate(s) for s in db.scalars(stmt)]
     return ApiResponse.ok(Page(items=items, next_cursor=None))
 
 

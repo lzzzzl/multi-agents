@@ -25,9 +25,11 @@ from app.agents import (
 )
 from app.core.config import settings
 from app.core.errors import classify_error, is_retryable_error
+from app.llms import get_llm_provider
 from app.models import Run, RunEvent, RunStep, Task
 from app.models.artifact import Artifact
 from app.services.eventing import append_event
+from app.services.span_service import record_llm_span
 from app.tools.runner import ToolRunner
 from app.workflows.base import Workflow
 from app.workflows.checkpoint import WorkflowCheckpoint, WorkflowSuspended
@@ -124,11 +126,27 @@ class SequentialWorkflow(Workflow):
         while True:
             attempts += 1
             try:
+                started = time.monotonic()
                 result = agent.run(ctx)
+                latency_ms = int((time.monotonic() - started) * 1000)
                 break
             except Exception as exc:  # noqa: BLE001
+                latency_ms = int((time.monotonic() - started) * 1000)
+                error_code = classify_error(exc)
+                # 每次失败的尝试都记录一条 span(含可重试的中间失败)
+                record_llm_span(
+                    db,
+                    run_id,
+                    step_id=step.id,
+                    agent_id=agent.agent_id,
+                    model=get_llm_provider().model,
+                    latency_ms=latency_ms,
+                    status="failed",
+                    attempt=attempts,
+                    error_code=error_code,
+                    error_message=str(exc),
+                )
                 if not is_retryable_error(exc) or attempts > self._max_step_retries:
-                    error_code = classify_error(exc)
                     step.status = "failed"
                     step.failed_at = self._now()
                     step.error_message = str(exc)
@@ -185,6 +203,19 @@ class SequentialWorkflow(Workflow):
                 "latency_ms": result.latency_ms,
                 "status": "success",
             },
+        )
+        # 成功的 LLM 调用记录一条 span(耗时取该次尝试的端到端墙钟时间)
+        record_llm_span(
+            db,
+            run_id,
+            step_id=step.id,
+            agent_id=agent.agent_id,
+            model=result.usage.model,
+            input_tokens=result.usage.input_tokens,
+            output_tokens=result.usage.output_tokens,
+            latency_ms=latency_ms,
+            status="success",
+            attempt=attempts,
         )
         self._append_event(
             db,
