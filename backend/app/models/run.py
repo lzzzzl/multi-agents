@@ -4,10 +4,9 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import DateTime, ForeignKey, String, Text
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base, JSONVariant, TimestampMixin
 from app.db.ids import generate_id
 
 
@@ -37,10 +36,10 @@ class Run(Base, TimestampMixin):
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
 
     # 运行开始时快照任务输入,保证历史回放不受任务后续修改影响
-    input_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    output_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    cost_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB, nullable=True)
+    input_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONVariant, nullable=True)
+    output_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONVariant, nullable=True)
+    cost_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONVariant, nullable=True)
+    metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONVariant, nullable=True)
 
     source_run_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
 

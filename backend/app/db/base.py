@@ -2,12 +2,17 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, func
+from sqlalchemy import JSON, DateTime, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):
     """所有 ORM 模型的基类。"""
+
+
+# 生产用 PostgreSQL JSONB;SQLite(测试真引擎)回退到通用 JSON
+JSONVariant = JSONB().with_variant(JSON(), "sqlite")
 
 
 class TimestampMixin:

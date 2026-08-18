@@ -3,10 +3,9 @@
 from typing import Any
 
 from sqlalchemy import String, Text
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base, JSONVariant, TimestampMixin
 from app.db.ids import generate_id
 
 
@@ -26,8 +25,8 @@ class Task(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String, nullable=False, default="draft", index=True)
     priority: Mapped[str] = mapped_column(String, nullable=False, default="normal")
 
-    input: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB, nullable=True)
+    input: Mapped[dict[str, Any] | None] = mapped_column(JSONVariant, nullable=True)
+    metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONVariant, nullable=True)
 
     runs: Mapped[list["Run"]] = relationship(  # type: ignore[name-defined]  # noqa: F821
         back_populates="task", cascade="all, delete-orphan"

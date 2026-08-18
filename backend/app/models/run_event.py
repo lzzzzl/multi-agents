@@ -3,11 +3,10 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base
+from app.db.base import Base, JSONVariant
 from app.db.ids import generate_id
 
 
@@ -29,7 +28,7 @@ class RunEvent(Base):
     type: Mapped[str] = mapped_column(String, nullable=False, index=True)
     # 在单个 run 内单调递增,SSE 用作游标
     sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONVariant, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -38,8 +37,9 @@ class RunEvent(Base):
     run: Mapped["Run"] = relationship(back_populates="events")  # type: ignore[name-defined]  # noqa: F821
 
     __table_args__ = (
-        # SSE 按 (run_id, sequence) 游标查询,核心索引
-        Index("ix_run_events_run_sequence", "run_id", "sequence"),
+        # Step 2.2:(run_id, sequence) 唯一,数据库层兜底防并发撞号;
+        # 唯一约束自带 (run_id, sequence) 索引,SSE 游标查询同样命中
+        UniqueConstraint("run_id", "sequence", name="uq_run_events_run_sequence"),
         Index("ix_run_events_run_created", "run_id", "created_at"),
     )
 
