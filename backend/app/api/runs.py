@@ -102,14 +102,12 @@ async def stream_events(
         db = SessionLocal()
         try:
             service = EventService(db)
+            # Step 2.4:stream yield 可序列化事件 dict(Redis 订阅/DB 兜底)
             async for ev in service.stream(run_id, after_sequence=after_sequence):
                 yield {
-                    "id": str(ev.sequence),
+                    "id": str(ev["sequence"]),
                     "event": "run_event",
-                    "data": json.dumps(
-                        RunEventOut.model_validate(ev).model_dump(mode="json"),
-                        ensure_ascii=False,
-                    ),
+                    "data": json.dumps(ev, ensure_ascii=False),
                 }
         finally:
             db.close()

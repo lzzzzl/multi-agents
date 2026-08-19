@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import Run, RunEvent
+from app.services.event_bus import publish_event
 
 # 撞号重试上限与基础退避(秒),实际退避 = base * 2^attempt * 随机抖动
 MAX_APPEND_RETRIES = 5
@@ -89,4 +90,6 @@ def _append_event_once(
     db.add(event)
     db.commit()
     db.refresh(event)
+    # Step 2.4:持久化成功后发布到 pub/sub(内部静默降级,订阅端有 DB 兜底)
+    publish_event(event)
     return event

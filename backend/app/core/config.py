@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     WORKFLOW_MAX_STEP_RETRIES: int = 1
     # 单步重试的退避基数(秒);第 n 次重试 sleep backoff * n
     STEP_RETRY_BACKOFF_SECONDS: float = 0.5
+    # ReAct 工具循环:单个 Agent step 内最多执行多少轮工具(Step 3.1)
+    AGENT_MAX_TOOL_ROUNDS: int = 3
 
     @property
     def cors_origins(self) -> list[str]:

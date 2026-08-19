@@ -1,4 +1,7 @@
-"""SequentialWorkflow:按顺序编排 Planner -> Writer -> Reviewer。
+"""SequentialWorkflow:按顺序编排 Planner -> Researcher(ReAct) -> Writer -> Reviewer。
+
+Researcher 在 research 节点内以 ReAct 循环连续调用工具(Step 3.1):
+思考 → 声明工具 → ToolRunner 执行 → 观察 → 再思考,直至显式终止或轮次上限。
 
 Writer 出稿后经 Reviewer 评审:
 - 若通过(quality=pass),结束并生成 artifact。
@@ -21,6 +24,7 @@ from app.agents import (
     PlannerAgent,
     ResearcherAgent,
     ReviewerAgent,
+    ToolExecutor,
     WriterAgent,
 )
 from app.core.config import settings
@@ -103,8 +107,13 @@ class SequentialWorkflow(Workflow):
         *,
         sequence: int,
         name_suffix: str = "",
+        tool_executor: ToolExecutor | None = None,
     ) -> Any:
-        """执行单个 Agent,创建 RunStep 并写事件,返回 AgentResult。"""
+        """执行单个 Agent,创建 RunStep 并写事件,返回 AgentResult。
+
+        tool_executor 由调用方传入(Step 3.1):Agent 的 ReAct 工具循环经该回调
+        执行工具;未传入时 Agent 保持单次 LLM 调用行为。
+        """
         step = RunStep(
             run_id=run_id,
             agent_id=agent.agent_id,
@@ -162,9 +171,15 @@ class SequentialWorkflow(Workflow):
             attempts += 1
             try:
                 started = time.monotonic()
-                result = agent.run(ctx, on_token=_on_token)
+                result = agent.run(ctx, on_token=_on_token, tool_executor=tool_executor)
                 latency_ms = int((time.monotonic() - started) * 1000)
                 break
+            except ApprovalRequired:
+                # ReAct 工具循环中等待审批:本步骤未完成,置回 pending;
+                # resume 会重新执行本步骤,已执行的工具按幂等键去重,不重复副作用
+                step.status = "pending"
+                db.commit()
+                raise
             except Exception as exc:  # noqa: BLE001
                 latency_ms = int((time.monotonic() - started) * 1000)
                 error_code = classify_error(exc)
@@ -225,6 +240,7 @@ class SequentialWorkflow(Workflow):
             "model": result.usage.model,
             "latency_ms": result.latency_ms,
             "attempts": attempts,
+            "tool_rounds": result.tool_rounds,
         }
         db.commit()
 
@@ -305,11 +321,12 @@ class SequentialWorkflow(Workflow):
         *,
         step_id: str | None,
     ) -> dict[str, Any]:
-        """执行工具调用,返回结果 dict。
+        """执行一次工具调用(ReAct 循环的一轮),返回观察结果 dict。
 
-        优先使用 Agent 声明的 tool_use;若缺失或非法,回退到 generate_report
-        依据任务标题生成初稿,保证工具调用链路始终可观测。工具失败时记录错误,
-        不中断 workflow。
+        tool_use 为 Researcher 声明的 {"name": ..., "args": ...};若缺失或非法,
+        回退到 generate_report 依据任务标题生成初稿(research 兜底路径)。
+        审批挂起信号(ApprovalRequired)向上传播由 _run_dag 持久化 checkpoint;
+        其他工具失败记录错误后返回,作为观察回传 LLM,不中断 workflow。
         """
         tool_name = "generate_report"
         args: dict[str, Any] = {"title": task.title, "outline": []}
@@ -395,8 +412,12 @@ class SequentialWorkflow(Workflow):
         task: Task,
         context: dict[str, Any],
         skip: set[str],
-    ) -> tuple[DAG, list[str]]:
-        """构建 DAG。skip 中的节点视为已完成,不构建且依赖被过滤。"""
+    ) -> tuple[DAG, list[str], dict[str, str | None]]:
+        """构建 DAG。skip 中的节点视为已完成,不构建且依赖被过滤。
+
+        返回 (DAG, completed, current):completed 为执行过程中追加的已完成节点,
+        current 跟踪当前执行到的节点(用于审批挂起时定位 checkpoint 位置)。
+        """
         completed: list[str] = []
 
         def _guard(ctx: dict[str, Any]) -> bool:
@@ -430,32 +451,36 @@ class SequentialWorkflow(Workflow):
             if _guard(ctx):
                 return None
             ctx["stats"]["sequence"] += 1
+            # Step 3.1:Researcher 以 ReAct 循环连续调用工具,
+            # 每轮声明经 _execute_tool(ToolRunner)执行并把观察回传给 LLM
+            executed = {"count": 0}
+
+            def _tool_executor(tool_use: dict[str, Any]) -> dict[str, Any]:
+                step_id = self._latest_step_id(db, run_id)
+                tool_result = self._execute_tool(db, run_id, task, tool_use, step_id=step_id)
+                ctx["previous"]["tool_result"] = tool_result
+                executed["count"] += 1
+                return tool_result
+
             result = self._run_agent_step(
                 db,
                 run_id,
                 self._researcher,
                 self._make_context(run, task, ctx["previous"]),
                 sequence=ctx["stats"]["sequence"],
+                tool_executor=_tool_executor,
             )
             ctx["previous"]["agent_researcher"] = result.output
             _accumulate(ctx, result)
+            if executed["count"] == 0:
+                # 循环未执行任何工具(如 LLM 直接判定无需工具):保留旧行为,
+                # 兜底执行 generate_report,保证工具调用链路始终可观测
+                step_id = self._latest_step_id(db, run_id)
+                ctx["previous"]["tool_result"] = self._execute_tool(
+                    db, run_id, task, result.output.get("tool_use"), step_id=step_id
+                )
             completed.append("research")
             return result.output
-
-        def execute_tool(ctx: dict[str, Any]) -> Any:
-            if _guard(ctx):
-                return None
-            step_id = self._latest_step_id(db, run_id)
-            tool_result = self._execute_tool(
-                db,
-                run_id,
-                task,
-                (ctx["previous"].get("agent_researcher") or {}).get("tool_use"),
-                step_id=step_id,
-            )
-            ctx["previous"]["tool_result"] = tool_result
-            completed.append("execute_tool")
-            return tool_result
 
         def compose(ctx: dict[str, Any]) -> Any:
             for round_no in range(self._max_rewrites + 1):
@@ -579,16 +604,26 @@ class SequentialWorkflow(Workflow):
         spec = [
             ("plan", plan, []),
             ("research", research, ["plan"]),
-            ("execute_tool", execute_tool, ["research"]),
-            ("compose", compose, ["execute_tool"]),
+            ("compose", compose, ["research"]),
             ("finalize", finalize, ["compose"]),
         ]
+        # 跟踪当前执行到的节点:ApprovalRequired 从 ReAct 循环抛出时,
+        # 据此把挂起位置记录到 checkpoint(Step 3.1)
+        current: dict[str, str | None] = {"node": None}
+
+        def _wrap(name: str, executor: Any) -> Any:
+            def wrapped(ctx: dict[str, Any]) -> Any:
+                current["node"] = name
+                return executor(ctx)
+
+            return wrapped
+
         nodes = [
-            DAGNode(name, executor, depends_on=[d for d in deps if d not in skip])
+            DAGNode(name, _wrap(name, executor), depends_on=[d for d in deps if d not in skip])
             for name, executor, deps in spec
             if name not in skip
         ]
-        return DAG(nodes), completed
+        return DAG(nodes), completed, current
 
     def _suspend(
         self,
@@ -624,7 +659,7 @@ class SequentialWorkflow(Workflow):
         if not run or not task:
             raise ValueError(f"Run {run_id} 或对应 Task 不存在")
 
-        dag, completed = self._build_dag(db, run_id, run, task, context, skip=skip)
+        dag, completed, current = self._build_dag(db, run_id, run, task, context, skip=skip)
         try:
             dag.run(context, parallel=False)
         except WorkflowSuspended as exc:
@@ -632,13 +667,14 @@ class SequentialWorkflow(Workflow):
                 db, run_id, completed, context, node=exc.node, reason=exc.reason
             )
         except ApprovalRequired as exc:
-            # 高风险工具等待审批:持久化 checkpoint,释放 worker(Step 2.1)
+            # ReAct 循环中的高风险工具等待审批:在当前节点持久化 checkpoint 并
+            # 释放 worker(Step 2.1);resume 时该节点整体重跑,工具按幂等键去重
             return self._suspend(
                 db,
                 run_id,
                 completed,
                 context,
-                node="execute_tool",
+                node=current["node"] or "research",
                 reason=f"等待工具审批: {exc.tool_name}",
             )
 

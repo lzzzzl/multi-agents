@@ -213,7 +213,11 @@ def _mk_event(seq: int) -> RunEvent:
 
 
 def _sse_client(events: list[RunEvent], run_status: str = "completed") -> TestClient:
-    """构造带 fake SessionLocal 的 TestClient:scalars 第一次返回 events,之后返回空。"""
+    """构造带 fake SessionLocal 的 TestClient:scalars 第一次返回 events,之后返回空。
+
+    强制 stream 走 DB 轮询回退(patch open_subscription 失败),
+    不依赖本地 Redis 是否在跑;订阅模式由 test_event_bus.py 单测覆盖。
+    """
     run = Run(id="run_sse", task_id="task_sse", status=run_status)
     db = MagicMock()
     db.get.side_effect = lambda model, id_: run if model is Run else None
@@ -227,15 +231,23 @@ def _sse_client(events: list[RunEvent], run_status: str = "completed") -> TestCl
 
     db.scalars.side_effect = _scalars
     # SSE 端点内部用 SessionLocal() 独立会话,不走 get_db 依赖注入
-    patcher = patch("app.api.runs.SessionLocal", return_value=db)
-    patcher.start()
+    patchers = [
+        patch("app.api.runs.SessionLocal", return_value=db),
+        patch(
+            "app.services.event_service.open_subscription",
+            side_effect=ConnectionError("no redis in test"),
+        ),
+    ]
+    for p in patchers:
+        p.start()
     client = TestClient(app)
-    client._sse_patcher = patcher  # type: ignore[attr-defined]
+    client._sse_patchers = patchers  # type: ignore[attr-defined]
     return client
 
 
 def _close_sse(client: TestClient) -> None:
-    client._sse_patcher.stop()  # type: ignore[attr-defined]
+    for p in client._sse_patchers:  # type: ignore[attr-defined]
+        p.stop()
 
 
 def test_sse_last_event_id_header_resumes_from_cursor() -> None:

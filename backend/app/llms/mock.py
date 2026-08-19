@@ -5,6 +5,7 @@
 从而让 Agent 流程可以在不依赖真实模型的情况下端到端跑通。
 """
 
+import json
 import re
 import time
 from collections.abc import Callable
@@ -55,6 +56,38 @@ class MockLLMProvider(LLMProvider):
     def _respond(self, system_text: str, user_text: str) -> str:
         task_title = _extract_title(user_text)
 
+        if "资料调研 Agent" in system_text or "researcher" in system_text.lower():
+            # ReAct 循环演示(Step 3.1):首轮声明 generate_report,
+            # 观察一次后补充 current_time,再观察后显式终止(tool_use: null)
+            observations = user_text.count("[工具观察]")
+            if observations == 0:
+                return json.dumps(
+                    {
+                        "tool_use": {
+                            "name": "generate_report",
+                            "args": {
+                                "title": task_title,
+                                "outline": ["背景", "现状分析", "结论"],
+                            },
+                        }
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            if observations == 1:
+                return json.dumps(
+                    {"tool_use": {"name": "current_time", "args": {}}},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            return json.dumps(
+                {
+                    "tool_use": None,
+                    "summary": "已完成资料调研:报告初稿已生成,并补充了当前时间信息。",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
         if "质量评审 Agent" in system_text or "reviewer" in system_text.lower():
             # 若被评审内容含 Writer 的修订标记,视为已重写并通过;
             # 否则首次评审判定为需修改,以触发一次重写循环。

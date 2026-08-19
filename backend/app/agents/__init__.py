@@ -1,6 +1,6 @@
 """Agent Runtime。Phase 2 实现 PlannerAgent / WriterAgent / ReviewerAgent。"""
 
-from app.agents.base import AgentContext, AgentResult, BaseAgent
+from app.agents.base import AgentContext, AgentResult, BaseAgent, ToolExecutor
 from app.agents.planner import PlannerAgent
 from app.agents.researcher import ResearcherAgent
 from app.agents.reviewer import ReviewerAgent
@@ -10,6 +10,7 @@ __all__ = [
     "AgentContext",
     "AgentResult",
     "BaseAgent",
+    "ToolExecutor",
     "PlannerAgent",
     "ResearcherAgent",
     "WriterAgent",
