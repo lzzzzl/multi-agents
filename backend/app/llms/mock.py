@@ -7,6 +7,7 @@
 
 import re
 import time
+from collections.abc import Callable
 
 from app.llms.base import LLMProvider
 from app.llms.types import LLMMessage, LLMResult, LLMUsage
@@ -15,8 +16,10 @@ from app.llms.types import LLMMessage, LLMResult, LLMUsage
 class MockLLMProvider(LLMProvider):
     model = "mock-model"
 
-    def __init__(self, *, latency_ms: int = 50) -> None:
+    def __init__(self, *, latency_ms: int = 50, stream_chunk_chars: int = 12) -> None:
         self.latency_ms = latency_ms
+        # 流式回调时每个 chunk 的目标长度(字符)
+        self.stream_chunk_chars = stream_chunk_chars
 
     def chat(
         self,
@@ -24,6 +27,7 @@ class MockLLMProvider(LLMProvider):
         *,
         temperature: float = 0.7,
         max_tokens: int | None = None,
+        on_token: Callable[[str], None] | None = None,
     ) -> LLMResult:
         # 依据 system prompt 判断调用方角色,user 文本仅用于提取任务标题
         system_text = " ".join(m.content for m in messages if m.role == "system")
@@ -31,12 +35,21 @@ class MockLLMProvider(LLMProvider):
         content = self._respond(system_text, user_text)
 
         started = time.monotonic()
-        time.sleep(self.latency_ms / 1000)
+        if on_token is not None:
+            # 把总延迟均摊到各 chunk,模拟逐字输出节奏(latency_ms=0 时不休眠,测试友好)
+            chunks = _chunk_text(content, self.stream_chunk_chars)
+            per_chunk_sleep = (self.latency_ms / 1000) / max(len(chunks), 1)
+            for piece in chunks:
+                time.sleep(per_chunk_sleep)
+                on_token(piece)
+        else:
+            time.sleep(self.latency_ms / 1000)
 
+        latency_ms = max(int((time.monotonic() - started) * 1000), self.latency_ms)
         return LLMResult(
             content=content,
             usage=LLMUsage(input_tokens=120, output_tokens=len(content) // 4, model=self.model),
-            latency_ms=self.latency_ms,
+            latency_ms=latency_ms,
         )
 
     def _respond(self, system_text: str, user_text: str) -> str:
@@ -86,6 +99,13 @@ class MockLLMProvider(LLMProvider):
             "  ]\n"
             "}"
         )
+
+
+def _chunk_text(text: str, size: int) -> list[str]:
+    """把文本切成固定长度的 chunk(至少 1 字符,避免空回调)。"""
+    if size <= 0:
+        size = 12
+    return [text[i : i + size] for i in range(0, len(text), size)] or [""]
 
 
 def _extract_title(text: str) -> str:

@@ -38,6 +38,10 @@ from app.workflows.dag import DAG, DAGNode
 
 logger = logging.getLogger(__name__)
 
+# token 增量聚合阈值:距上次 flush 的间隔与最小字符数,二者同时满足才写事件
+TOKEN_FLUSH_INTERVAL_SECONDS = 0.4
+TOKEN_FLUSH_MIN_CHARS = 12
+
 
 class SequentialWorkflow(Workflow):
     """串行编排 Agent,并在 Reviewer 不通过时自动触发重写循环。"""
@@ -124,11 +128,41 @@ class SequentialWorkflow(Workflow):
         )
 
         attempts = 0
+        # Step 2.3:token 增量缓冲,按时间/长度阈值聚合成 llm_token 事件,
+        # 避免逐 token 写事件打爆 run_events 表
+        token_buf: list[str] = []
+        token_flushed_at = time.monotonic()
+
+        def _flush_tokens() -> None:
+            nonlocal token_flushed_at
+            if not token_buf:
+                return
+            delta = "".join(token_buf)
+            token_buf.clear()
+            token_flushed_at = time.monotonic()
+            self._append_event(
+                db,
+                run_id,
+                type="llm_token",
+                step_id=step.id,
+                agent_id=agent.agent_id,
+                payload={"delta": delta},
+            )
+
+        def _on_token(chunk: str) -> None:
+            token_buf.append(chunk)
+            buffered = sum(len(c) for c in token_buf)
+            if (
+                time.monotonic() - token_flushed_at >= TOKEN_FLUSH_INTERVAL_SECONDS
+                and buffered >= TOKEN_FLUSH_MIN_CHARS
+            ):
+                _flush_tokens()
+
         while True:
             attempts += 1
             try:
                 started = time.monotonic()
-                result = agent.run(ctx)
+                result = agent.run(ctx, on_token=_on_token)
                 latency_ms = int((time.monotonic() - started) * 1000)
                 break
             except Exception as exc:  # noqa: BLE001
@@ -178,6 +212,9 @@ class SequentialWorkflow(Workflow):
                     attempts,
                 )
                 time.sleep(settings.STEP_RETRY_BACKOFF_SECONDS * attempts)
+
+        # 收尾:把残余 token 增量一次性 flush(Agent 未开启流式时为 no-op)
+        _flush_tokens()
 
         step.status = "completed"
         step.completed_at = self._now()

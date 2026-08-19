@@ -67,12 +67,16 @@ def _append_event_once(
     agent_id: str | None,
     tool_call_id: str | None,
 ) -> RunEvent:
-    # 锁住 run 行,串行化同一 run 的 sequence 分配(SQLite 忽略该子句,靠唯一约束兜底)
+    # PG:锁住 run 行,串行化同一 run 的 sequence 分配
+    # (SQLite 忽略 FOR UPDATE,靠下方原子 INSERT 表达式兜底)
     db.execute(select(Run.id).where(Run.id == run_id).with_for_update())
-    current_max = db.scalar(
-        select(func.max(RunEvent.sequence)).where(RunEvent.run_id == run_id)
+    # sequence 在 INSERT 内用 max+1 子查询计算:
+    # SQLite 单写锁下语句原子执行,彻底消除「读到同一 max 后各写各的」竞态
+    next_seq = (
+        select(func.coalesce(func.max(RunEvent.sequence), 0) + 1)
+        .where(RunEvent.run_id == run_id)
+        .scalar_subquery()
     )
-    next_seq = (current_max or 0) + 1
     event = RunEvent(
         run_id=run_id,
         step_id=step_id,

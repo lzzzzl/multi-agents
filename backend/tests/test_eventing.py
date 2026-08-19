@@ -1,33 +1,23 @@
-"""append_event 事件写入测试。"""
+"""append_event 事件写入测试。
+
+sequence 的取值/并发安全由 tests/test_eventing_concurrency.py
+用真实 SQLite 引擎覆盖;本文件验证字段持久化等基础行为(mock db)。
+"""
 
 from unittest.mock import MagicMock
-
-import pytest
 
 from app.models import RunEvent
 from app.services.eventing import append_event
 
 
-def _make_db(max_seq: int | None) -> MagicMock:
+def _make_db() -> MagicMock:
     db = MagicMock()
-    db.scalar.return_value = max_seq
+    db.scalar.return_value = None
     return db
 
 
-def test_append_event_sequence_starts_at_one() -> None:
-    db = _make_db(max_seq=None)
-    ev = append_event(db, "run_x", type="run_started")
-    assert ev.sequence == 1
-
-
-def test_append_event_sequence_increments() -> None:
-    db = _make_db(max_seq=3)
-    ev = append_event(db, "run_x", type="run_completed")
-    assert ev.sequence == 4
-
-
 def test_append_event_persists_fields() -> None:
-    db = _make_db(max_seq=None)
+    db = _make_db()
     ev = append_event(
         db,
         "run_x",
@@ -47,13 +37,28 @@ def test_append_event_persists_fields() -> None:
     db.commit.assert_called_once()
 
 
-@pytest.mark.xfail(
-    reason="SELECT MAX(sequence)+1 存在并发竞态,将在 V2 Step 2.2 修复",
-    strict=True,
-)
-def test_append_event_concurrent_sequence_is_unique() -> None:
-    """模拟两个并发写入都读到相同 MAX,当前实现会生成重复 sequence。"""
-    db = _make_db(max_seq=0)
-    ev1 = append_event(db, "run_x", type="a")
-    ev2 = append_event(db, "run_x", type="b")
-    assert ev1.sequence != ev2.sequence
+def test_append_event_retry_on_integrity_error() -> None:
+    """撞号时回滚并重试,最终成功返回。"""
+    from sqlalchemy.exc import IntegrityError
+
+    import app.services.eventing as eventing
+
+    db = _make_db()
+    real = eventing._append_event_once
+    calls = {"n": 0}
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise IntegrityError("INSERT", {}, Exception("dup"))
+        return real(*args, **kwargs)
+
+    eventing._append_event_once = flaky
+    try:
+        ev = append_event(db, "run_x", type="a")
+    finally:
+        eventing._append_event_once = real
+
+    assert calls["n"] == 2
+    assert ev.type == "a"
+    db.rollback.assert_called_once()

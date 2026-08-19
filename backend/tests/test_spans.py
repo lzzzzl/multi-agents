@@ -26,7 +26,7 @@ class AlwaysFailingProvider:
     def __init__(self, code: str) -> None:
         self.code = code
 
-    def chat(self, messages, *, temperature=0.7, max_tokens=None):
+    def chat(self, messages, *, temperature=0.7, max_tokens=None, on_token=None):
         raise LLMError("boom", code=self.code)
 
 
@@ -39,11 +39,13 @@ class FlakyLLMProvider:
         self.calls = 0
         self._real = MockLLMProvider(latency_ms=0)
 
-    def chat(self, messages, *, temperature=0.7, max_tokens=None):
+    def chat(self, messages, *, temperature=0.7, max_tokens=None, on_token=None):
         self.calls += 1
         if self.calls == 1:
             raise LLMError("timeout", code="LLM_TIMEOUT")
-        return self._real.chat(messages, temperature=temperature, max_tokens=max_tokens)
+        return self._real.chat(
+            messages, temperature=temperature, max_tokens=max_tokens, on_token=on_token
+        )
 
 
 def _make_fake_db(run: Run, task: Task) -> MagicMock:

@@ -9,6 +9,7 @@ Agent 负责:
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -42,6 +43,9 @@ class BaseAgent(ABC):
     agent_id: str
     name: str
     system_prompt: str
+    # Step 2.3:为 True 时,上层传入的 on_token 回调会被启用,
+    # LLM 输出以 token 增量推送(如 Writer 逐字输出);默认关闭避免噪音。
+    stream_output: bool = False
 
     @abstractmethod
     def build_user_prompt(self, ctx: AgentContext) -> str:
@@ -52,13 +56,16 @@ class BaseAgent(ABC):
         """把 LLM 原始输出解析为结构化 output。默认原样包裹。"""
         return {"content": content}
 
-    def run(self, ctx: AgentContext) -> AgentResult:
+    def run(
+        self, ctx: AgentContext, *, on_token: Callable[[str], None] | None = None
+    ) -> AgentResult:
         llm = get_llm_provider()
         messages = [
             LLMMessage(role="system", content=self.system_prompt),
             LLMMessage(role="user", content=self.build_user_prompt(ctx)),
         ]
-        result = llm.chat(messages)
+        callback = on_token if (self.stream_output and on_token is not None) else None
+        result = llm.chat(messages, on_token=callback)
         return AgentResult(
             agent_id=self.agent_id,
             name=self.name,

@@ -14,6 +14,8 @@ class WriterAgent(BaseAgent):
     agent_id = "agent_writer"
     name = "Writer"
     system_prompt = SYSTEM_PROMPT
+    # 正文撰写开启 token 流式,前端可逐字看到 Writer 输出(Step 2.3)
+    stream_output = True
 
     def build_user_prompt(self, ctx: AgentContext) -> str:
         task = ctx.task

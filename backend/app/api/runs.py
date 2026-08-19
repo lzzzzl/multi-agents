@@ -2,7 +2,7 @@
 
 import json
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sse_starlette.sse import EventSourceResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -82,9 +82,20 @@ def list_run_llm_spans(run_id: str, db: Session = Depends(get_db)) -> ApiRespons
 @router.get("/{run_id}/events/stream")
 async def stream_events(
     run_id: str,
+    request: Request,
     after_sequence: int | None = None,
 ) -> EventSourceResponse:
-    """SSE 订阅运行事件。断线重连时带 Last-Event-ID / after_sequence。"""
+    """SSE 订阅运行事件。
+
+    断线重连:浏览器 EventSource 自动携带 Last-Event-ID 请求头
+    (取自最近一条事件的 id,即 sequence),优先级高于 after_sequence
+    查询参数,保证重连后从断点续传、不丢事件。
+    """
+
+    # Header > query param:重连请求以 Last-Event-ID 为准
+    last_event_id = request.headers.get("Last-Event-ID")
+    if last_event_id and last_event_id.isdigit():
+        after_sequence = int(last_event_id)
 
     async def event_generator():
         # 每个连接使用独立会话,避免与请求生命周期耦合

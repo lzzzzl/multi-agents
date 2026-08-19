@@ -114,15 +114,33 @@ function eventColor(type: string): string {
 }
 
 export function RunTimeline({ events, live }: TimelineProps) {
+  // llm_token 事件不单独成行,按 step 聚合为「实时输出」块(Step 2.3 逐字输出)
+  const tokenEvents = events.filter((e) => e.type === "llm_token");
+  const completedStepIds = new Set(
+    events.filter((e) => e.type === "step_completed" && e.step_id).map((e) => e.step_id),
+  );
+  const streams = new Map<string, { agentId: string; text: string }>();
+  for (const ev of tokenEvents) {
+    const sid = ev.step_id ?? "_";
+    const prev = streams.get(sid) ?? { agentId: ev.agent_id ?? "", text: "" };
+    streams.set(sid, {
+      agentId: prev.agentId || ev.agent_id || "",
+      text: prev.text + String(ev.payload?.delta ?? ""),
+    });
+  }
+  // 步骤已完成的流不再展示(最终内容经 artifact/步骤输出呈现)
+  const liveStreams = [...streams.entries()].filter(([sid]) => !completedStepIds.has(sid));
+  const rows = events.filter((e) => e.type !== "llm_token");
+
   return (
     <div className="relative">
       {/* 纵向时间线 */}
       <div className="absolute inset-y-2 left-[7px] w-px bg-line" />
 
       <div className="space-y-1">
-        {events.map((ev) => {
+        {rows.map((ev) => {
           const color = eventColor(ev.type);
-          const isLive = live && ev.sequence === events[events.length - 1]?.sequence;
+          const isLive = live && ev.sequence === rows[rows.length - 1]?.sequence;
           return (
             <div key={ev.id} className="group relative flex gap-3.5 rounded-lg px-2 py-2 transition-colors hover:bg-zinc-bg/60">
               <span
@@ -150,6 +168,20 @@ export function RunTimeline({ events, live }: TimelineProps) {
           );
         })}
       </div>
+
+      {/* 正在流式输出的 Agent:逐字渲染累积文本 */}
+      {liveStreams.map(([sid, stream]) => (
+        <div key={`stream-${sid}`} className="relative mt-2 rounded-lg border border-line bg-zinc-bg/60 px-3 py-2.5">
+          <div className="flex items-center gap-2 text-sm font-semibold text-accent">
+            <span className="h-2 w-2 rounded-full bg-accent dot-live" />
+            {stream.agentId ? `${stream.agentId.replace("agent_", "")} 正在输出…` : "正在输出…"}
+          </div>
+          <pre className="stream-text mt-1.5 max-h-72 overflow-y-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-muted">
+            {stream.text}
+            <span className="cursor-blink">▍</span>
+          </pre>
+        </div>
+      ))}
 
       {live && (
         <div className="relative z-10 mt-2 flex items-center gap-2 px-2 pt-2 text-sm text-accent">
