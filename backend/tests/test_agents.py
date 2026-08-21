@@ -4,18 +4,26 @@ from unittest.mock import patch
 
 from app.agents import PlannerAgent, ReviewerAgent, WriterAgent
 from app.agents.base import AgentContext
+from app.agents.message_bus import MessageBus
 from app.llms.mock import MockLLMProvider
 from app.models import Run, Task
 
 
-def _make_context(input_: dict | None = None, previous: dict | None = None) -> AgentContext:
+def _make_context(
+    input_: dict | None = None, messages: dict[str, list[dict]] | None = None
+) -> AgentContext:
+    """构造测试上下文;messages 为预置到 bus 的上游消息(topic -> 消息列表)。"""
     task = Task(id="task_1", title="编写一份 AI 行业报告", description="覆盖市场与趋势")
     run = Run(id="run_1", task_id="task_1")
+    bus = MessageBus()
+    for topic, msgs in (messages or {}).items():
+        for msg in msgs:
+            bus.publish(topic, msg)
     return AgentContext(
         run=run,
         task=task,
         input=input_ or {},
-        previous=previous or {},
+        bus=bus,
     )
 
 
@@ -36,7 +44,7 @@ def test_writer_produces_markdown(_mock) -> None:
             {"sequence": 2, "name": "撰写", "description": "撰写正文"},
         ]
     }
-    ctx = _make_context(previous={"agent_planner": plan})
+    ctx = _make_context(messages={"agent_planner": [plan]})
     result = WriterAgent().run(ctx)
     assert result.output["markdown"].startswith("#")
     assert result.agent_id == "agent_writer"
@@ -45,9 +53,7 @@ def test_writer_produces_markdown(_mock) -> None:
 @patch("app.agents.base.get_llm_provider", return_value=MockLLMProvider(latency_ms=0))
 def test_reviewer_passes(_mock) -> None:
     ctx = _make_context(
-        previous={
-            "agent_writer": {"markdown": "# 草稿\n\n内容"},
-        }
+        messages={"agent_writer": [{"markdown": "# 草稿\n\n内容"}]}
     )
     result = ReviewerAgent().run(ctx)
     assert result.output["quality"] in {"pass", "revision"}

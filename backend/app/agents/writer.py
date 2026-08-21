@@ -25,7 +25,7 @@ class WriterAgent(BaseAgent):
         if ctx.input:
             lines.append(f"任务输入: {json.dumps(ctx.input, ensure_ascii=False)}")
 
-        plan = ctx.previous.get("agent_planner") or {}
+        plan = ctx.bus.latest("agent_planner") or {}
         steps = plan.get("steps") or []
         if steps:
             lines.append("执行计划:")
@@ -35,20 +35,21 @@ class WriterAgent(BaseAgent):
                 lines.append(f"- {name}: {desc}")
 
         # 若 Researcher 通过工具生成了初稿,作为撰写素材
-        tool_result = ctx.previous.get("tool_result") or {}
+        tool_result = ctx.bus.latest("tool_result") or {}
         draft = tool_result.get("draft")
         if draft:
             lines.append("下面是通过工具生成的报告初稿,请据此润色、补全并重写为完整定稿:")
             lines.append(draft)
 
         # 若上一稿被 Reviewer 打回,携带反馈与上一稿内容要求重写
-        review = ctx.previous.get("agent_reviewer") or {}
+        review = ctx.bus.latest("agent_reviewer") or {}
         if review.get("quality") == "revision":
             feedback = review.get("feedback") or ""
             lines.append("上一稿评审意见(请据此修改):")
             lines.append(feedback or "(无具体意见,请自行改进)")
 
-            prev_writer = ctx.previous.get("agent_writer") or {}
+            # 上一稿:agent_writer 主题的最新消息(本次重写尚未发布)
+            prev_writer = ctx.bus.latest("agent_writer") or {}
             prev_draft = prev_writer.get("markdown") or prev_writer.get("content") or ""
             if prev_draft:
                 lines.append("上一稿内容:")

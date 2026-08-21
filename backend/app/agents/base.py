@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.agents.message_bus import MessageBus
 from app.llms import LLMMessage, LLMUsage, get_llm_provider
 from app.models import Run, Task
 
@@ -26,12 +27,16 @@ ToolExecutor = Callable[[dict[str, Any]], dict[str, Any]]
 
 @dataclass
 class AgentContext:
-    """一次 Agent 执行所需的上下文。"""
+    """一次 Agent 执行所需的上下文。
+
+    上游输出经 bus 传递(Step 3.2):ctx.bus.latest("<agent_id>") 取最新,
+    ctx.bus.history("<agent_id>") 取全部(如 Writer 重写回看上一稿)。
+    """
 
     run: Run
     task: Task
     input: dict[str, Any]  # 该 run 的输入快照
-    previous: dict[str, dict[str, Any]] = field(default_factory=dict)  # agent_id -> output
+    bus: MessageBus = field(default_factory=MessageBus)
 
 
 @dataclass

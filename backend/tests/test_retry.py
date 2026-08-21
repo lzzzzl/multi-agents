@@ -61,7 +61,7 @@ def _make_step_args():
     run = Run(id="run_x", task_id="task_x", input_snapshot={})
     task = Task(id="task_x", title="测试任务", description=None)
     db = _make_fake_db(run, task)
-    ctx = AgentContext(run=run, task=task, input={}, previous={})
+    ctx = AgentContext(run=run, task=task, input={})
     return run, task, db, ctx
 
 

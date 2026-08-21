@@ -27,6 +27,7 @@ from app.agents import (
     ToolExecutor,
     WriterAgent,
 )
+from app.agents.message_bus import MessageBus
 from app.core.config import settings
 from app.core.errors import classify_error, is_retryable_error
 from app.llms import get_llm_provider
@@ -293,14 +294,12 @@ class SequentialWorkflow(Workflow):
         )
         return result
 
-    def _make_context(
-        self, run: Run, task: Task, previous: dict[str, dict[str, Any]] | None = None
-    ) -> AgentContext:
+    def _make_context(self, run: Run, task: Task, bus: MessageBus) -> AgentContext:
         return AgentContext(
             run=run,
             task=task,
             input=run.input_snapshot or {},
-            previous=previous or {},
+            bus=bus,
         )
 
     def _latest_step_id(self, db: Session, run_id: str) -> str | None:
@@ -362,7 +361,7 @@ class SequentialWorkflow(Workflow):
 
     def _new_context(self) -> dict[str, Any]:
         return {
-            "previous": {},
+            "bus": MessageBus(),
             "stats": {
                 "sequence": 0,
                 "input_tokens": 0,
@@ -393,6 +392,9 @@ class SequentialWorkflow(Workflow):
     ) -> None:
         run = db.get(Run, run_id)
         metadata = dict(run.metadata_ or {})
+        # bus 为运行时对象,持久化前转为纯 dict(Step 3.2)
+        if isinstance(checkpoint.context.get("bus"), MessageBus):
+            checkpoint.context["bus"] = checkpoint.context["bus"].to_state()
         metadata["checkpoint"] = checkpoint.to_dict()
         run.metadata_ = metadata
         db.commit()
@@ -439,10 +441,10 @@ class SequentialWorkflow(Workflow):
                 db,
                 run_id,
                 self._planner,
-                self._make_context(run, task, ctx["previous"]),
+                self._make_context(run, task, ctx["bus"]),
                 sequence=ctx["stats"]["sequence"],
             )
-            ctx["previous"]["agent_planner"] = result.output
+            ctx["bus"].publish("agent_planner", result.output)
             _accumulate(ctx, result)
             completed.append("plan")
             return result.output
@@ -458,7 +460,8 @@ class SequentialWorkflow(Workflow):
             def _tool_executor(tool_use: dict[str, Any]) -> dict[str, Any]:
                 step_id = self._latest_step_id(db, run_id)
                 tool_result = self._execute_tool(db, run_id, task, tool_use, step_id=step_id)
-                ctx["previous"]["tool_result"] = tool_result
+                # Step 3.2:工具观察也经 bus 传递,Writer 订阅 tool_result 取初稿
+                ctx["bus"].publish("tool_result", tool_result)
                 executed["count"] += 1
                 return tool_result
 
@@ -466,18 +469,21 @@ class SequentialWorkflow(Workflow):
                 db,
                 run_id,
                 self._researcher,
-                self._make_context(run, task, ctx["previous"]),
+                self._make_context(run, task, ctx["bus"]),
                 sequence=ctx["stats"]["sequence"],
                 tool_executor=_tool_executor,
             )
-            ctx["previous"]["agent_researcher"] = result.output
+            ctx["bus"].publish("agent_researcher", result.output)
             _accumulate(ctx, result)
             if executed["count"] == 0:
                 # 循环未执行任何工具(如 LLM 直接判定无需工具):保留旧行为,
                 # 兜底执行 generate_report,保证工具调用链路始终可观测
                 step_id = self._latest_step_id(db, run_id)
-                ctx["previous"]["tool_result"] = self._execute_tool(
-                    db, run_id, task, result.output.get("tool_use"), step_id=step_id
+                ctx["bus"].publish(
+                    "tool_result",
+                    self._execute_tool(
+                        db, run_id, task, result.output.get("tool_use"), step_id=step_id
+                    ),
                 )
             completed.append("research")
             return result.output
@@ -494,11 +500,11 @@ class SequentialWorkflow(Workflow):
                     db,
                     run_id,
                     self._writer,
-                    self._make_context(run, task, ctx["previous"]),
+                    self._make_context(run, task, ctx["bus"]),
                     sequence=ctx["stats"]["sequence"],
                     name_suffix=suffix,
                 )
-                ctx["previous"]["agent_writer"] = writer_result.output
+                ctx["bus"].publish("agent_writer", writer_result.output)
                 _accumulate(ctx, writer_result)
 
                 ctx["stats"]["sequence"] += 1
@@ -506,11 +512,11 @@ class SequentialWorkflow(Workflow):
                     db,
                     run_id,
                     self._reviewer,
-                    self._make_context(run, task, ctx["previous"]),
+                    self._make_context(run, task, ctx["bus"]),
                     sequence=ctx["stats"]["sequence"],
                     name_suffix=suffix,
                 )
-                ctx["previous"]["agent_reviewer"] = reviewer_result.output
+                ctx["bus"].publish("agent_reviewer", reviewer_result.output)
                 _accumulate(ctx, reviewer_result)
 
                 ctx["quality"] = reviewer_result.output.get("quality") or "revision"
@@ -563,7 +569,7 @@ class SequentialWorkflow(Workflow):
                 payload={"artifact_id": artifact.id, "name": artifact.name},
             )
 
-            plan_output = ctx["previous"].get("agent_planner") or {}
+            plan_output = ctx["bus"].latest("agent_planner") or {}
             json_content = {
                 "task": {"id": task.id, "title": task.title},
                 "workflow": self.name,
@@ -658,6 +664,10 @@ class SequentialWorkflow(Workflow):
         task = db.get(Task, run.task_id) if run else None
         if not run or not task:
             raise ValueError(f"Run {run_id} 或对应 Task 不存在")
+
+        # 从 checkpoint 恢复时 bus 为纯 dict,重建为运行时对象(Step 3.2)
+        if isinstance(context.get("bus"), dict):
+            context["bus"] = MessageBus.from_state(context["bus"])
 
         dag, completed, current = self._build_dag(db, run_id, run, task, context, skip=skip)
         try:

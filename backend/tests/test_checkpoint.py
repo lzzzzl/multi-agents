@@ -8,7 +8,7 @@ def test_checkpoint_roundtrip() -> None:
         workflow_name="sequential_report",
         completed_nodes=["plan", "research"],
         context={
-            "previous": {"agent_planner": {"steps": []}},
+            "bus": {"agent_planner": [{"steps": []}]},
             "stats": {"sequence": 2, "input_tokens": 10, "output_tokens": 20, "steps": 2},
             "cancelled": False,
             "quality": "revision",

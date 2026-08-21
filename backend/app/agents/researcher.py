@@ -50,7 +50,7 @@ class ResearcherAgent(BaseAgent):
         if ctx.input:
             lines.append(f"任务输入: {json.dumps(ctx.input, ensure_ascii=False)}")
 
-        plan = ctx.previous.get("agent_planner") or {}
+        plan = ctx.bus.latest("agent_planner") or {}
         steps = plan.get("steps") or []
         if steps:
             lines.append("执行计划:")

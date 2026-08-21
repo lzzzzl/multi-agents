@@ -31,7 +31,7 @@ class ReviewerAgent(BaseAgent):
         if ctx.input:
             lines.append(f"任务输入: {json.dumps(ctx.input, ensure_ascii=False)}")
 
-        writer = ctx.previous.get("agent_writer") or {}
+        writer = ctx.bus.latest("agent_writer") or {}
         draft = writer.get("markdown") or writer.get("content") or ""
         lines.append("待评审报告:")
         lines.append(draft or "(无正文)")
